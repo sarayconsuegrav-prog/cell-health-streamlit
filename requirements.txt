@@ -4,4 +4,4 @@ opencv-python-headless>=4.10
 numpy>=1.26
 av>=15.1.0,<18
 aiortc>=1.14.0,<2
-streamlit-webrtc==0.65.0
+streamlit-webrtc==0.65.4
