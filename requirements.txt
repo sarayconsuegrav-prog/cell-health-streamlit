@@ -2,6 +2,7 @@ streamlit>=1.39,<2
 ultralytics>=8.3
 opencv-python-headless>=4.10
 numpy>=1.26
+tornado>=6.3,<7
 av>=15.1.0,<18
 aiortc>=1.14.0,<2
 streamlit-webrtc==0.65.4
