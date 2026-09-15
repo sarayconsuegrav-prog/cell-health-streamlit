@@ -31,8 +31,10 @@ try:
     from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
     WEBRTC_AVAILABLE = True
-except ImportError:
+    WEBRTC_IMPORT_ERROR = ""
+except ImportError as error:
     WEBRTC_AVAILABLE = False
+    WEBRTC_IMPORT_ERROR = f"{type(error).__name__}: {error}"
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -64,6 +66,9 @@ COLORS_BGR = {
     "otra": (220, 165, 30),      # Azul
 }
 LIVE_INFERENCE_LOCK = Lock()
+RTC_CONFIGURATION = {
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
+}
 
 
 def default_model_path() -> Path:
@@ -802,7 +807,11 @@ def render_photo_mode(
 def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opacity: float) -> None:
     """Mantiene la cámara encendida y devuelve los cuadros con máscaras en tiempo real."""
     if not WEBRTC_AVAILABLE:
-        st.error("Falta instalar el componente de cámara en vivo. Ejecuta `pip install -r requirements.txt`.")
+        st.error("No se pudo cargar el componente de cámara en vivo.")
+        st.caption(
+            "Detalle de la dependencia: "
+            f"{WEBRTC_IMPORT_ERROR or 'error de importación desconocido'}"
+        )
         return
 
     st.markdown(
@@ -882,6 +891,7 @@ def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opa
             webrtc_streamer(
                 key="cell_live_camera",
                 mode=WebRtcMode.SENDRECV,
+                rtc_configuration=RTC_CONFIGURATION,
                 media_stream_constraints={
                     "video": {
                         "width": {"ideal": 640},
