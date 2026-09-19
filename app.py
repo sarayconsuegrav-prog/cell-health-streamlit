@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.request
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from threading import Lock
@@ -58,6 +59,29 @@ LIVE_IMAGE_SIZE = 640
 VIDEO_IMAGE_SIZE = 512
 LIVE_INFERENCE_EVERY_N_FRAMES = 3
 VIDEO_INFERENCE_STRIDE = 2
+LIVE_RESOLUTIONS = {
+    "640 × 480 (480p)": {
+        "width": 640,
+        "height": 480,
+        "frame_rate": 24,
+        "inference_size": 640,
+        "inference_every": 3,
+    },
+    "1280 × 720 (HD)": {
+        "width": 1280,
+        "height": 720,
+        "frame_rate": 20,
+        "inference_size": 768,
+        "inference_every": 4,
+    },
+    "1920 × 1080 (Full HD · 2 MP)": {
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": 15,
+        "inference_size": 960,
+        "inference_every": 5,
+    },
+}
 
 # Colores BGR de las capas de segmentación.
 COLORS_BGR = {
@@ -100,8 +124,20 @@ def normalize_class_name(name: str) -> str:
 
 
 def load_model(model_path: str) -> YOLO:
-    """Carga una instancia nueva para evitar reutilizar un modelo ya fusionado."""
+    """Carga el modelo de YOLO para la sesión actual."""
     return YOLO(model_path)
+
+
+def get_session_model(model_path: Path) -> YOLO:
+    """Conserva el modelo entre reruns sin compartir el tracker entre usuarios."""
+    model_key = str(model_path)
+    cached_model = st.session_state.get("cell_model")
+    cached_model_path = st.session_state.get("cell_model_path")
+    if cached_model is None or cached_model_path != model_key:
+        cached_model = load_model(model_key)
+        st.session_state["cell_model"] = cached_model
+        st.session_state["cell_model_path"] = model_key
+    return cached_model
 
 
 def reset_trackers(model: YOLO) -> None:
@@ -253,6 +289,68 @@ def new_measurement_samples() -> dict[str, dict[str, list[float]]]:
         "perimeters_px": {"sana": [], "enferma": []},
         "diameters_px": {"sana": [], "enferma": []},
     }
+
+
+@dataclass
+class LiveSessionState:
+    """Estado compartido entre el callback WebRTC y la interfaz Streamlit."""
+
+    lock: Lock = field(default_factory=Lock)
+    detection_active: bool = False
+    show_healthy_masks: bool = True
+    show_sick_masks: bool = True
+    frame_number: int = 0
+    processed_frames: int = 0
+    track_votes: dict[int, Counter] = field(default_factory=lambda: defaultdict(Counter))
+    measurement_samples: dict[str, dict[str, list[float]]] = field(default_factory=new_measurement_samples)
+    calibration: dict[str, Any] | None = None
+    cached_shape: tuple[int, ...] | None = None
+    cached_healthy_masks: np.ndarray | None = None
+    cached_sick_masks: np.ndarray | None = None
+    last_error: str = ""
+
+    def reset_metrics(self) -> None:
+        """Limpia el conteo al iniciar una nueva captura."""
+        with self.lock:
+            self.frame_number = 0
+            self.processed_frames = 0
+            self.track_votes = defaultdict(Counter)
+            self.measurement_samples = new_measurement_samples()
+            self.calibration = None
+            self.cached_shape = None
+            self.cached_healthy_masks = None
+            self.cached_sick_masks = None
+            self.last_error = ""
+
+    def set_detection_active(self, active: bool) -> None:
+        with self.lock:
+            self.detection_active = active
+
+    def snapshot(self) -> dict[str, Any]:
+        """Obtiene una copia coherente de las métricas para el panel lateral."""
+        with self.lock:
+            counts = summarize_tracks(self.track_votes)
+            measurements = (
+                summarize_measurement_samples(self.measurement_samples, self.calibration)
+                if self.calibration is not None
+                else None
+            )
+            return {
+                "detection_active": self.detection_active,
+                "counts": counts,
+                "measurements": measurements,
+                "processed_frames": self.processed_frames,
+                "last_error": self.last_error,
+            }
+
+
+def get_live_session_state() -> LiveSessionState:
+    """Crea un estado independiente para cada sesión del navegador."""
+    state = st.session_state.get("live_session_state")
+    if not isinstance(state, LiveSessionState):
+        state = LiveSessionState()
+        st.session_state["live_session_state"] = state
+    return state
 
 
 def collect_measurement_samples(
@@ -804,8 +902,72 @@ def render_photo_mode(
     )
 
 
-def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opacity: float) -> None:
-    """Mantiene la cámara encendida y devuelve los cuadros con máscaras en tiempo real."""
+def render_live_metrics_panel(state: LiveSessionState, resolution_label: str) -> None:
+    """Muestra el conteo del tracker y las métricas que llegan del callback WebRTC."""
+
+    def render_metrics() -> None:
+        snapshot = state.snapshot()
+        counts = snapshot["counts"]
+        denominator = counts["sana"] + counts["enferma"]
+        affected_percentage = counts["enferma"] / denominator * 100 if denominator else 0.0
+        status = "DETECCIÓN ACTIVA" if snapshot["detection_active"] else "VISTA PREVIA"
+        status_class = "live-metrics-active" if snapshot["detection_active"] else "live-metrics-idle"
+
+        st.markdown(
+            f"""
+            <section class="live-metrics-panel">
+              <span class="live-status-badge {status_class}">{status}</span>
+              <h3>Métricas en vivo</h3>
+              <p>El tracker cuenta cada célula una sola vez mientras la detección está activa.</p>
+              <div class="live-status-row"><span>Resolución de captura</span><strong>{escape(resolution_label)}</strong></div>
+              <div class="live-status-row"><span>Fotogramas analizados</span><strong>{snapshot['processed_frames']:,}</strong></div>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        metric_row_one = st.columns(2)
+        with metric_row_one[0]:
+            st.metric("Células sanas", counts["sana"])
+        with metric_row_one[1]:
+            st.metric("Células enfermas", counts["enferma"])
+        metric_row_two = st.columns(2)
+        with metric_row_two[0]:
+            st.metric("Total contabilizado", counts["total"])
+        with metric_row_two[1]:
+            st.metric("Afectación", f"{affected_percentage:.1f}%")
+
+        measurements = snapshot["measurements"]
+        if measurements:
+            st.markdown('<div class="live-measurements-heading">Medidas promedio</div>', unsafe_allow_html=True)
+            healthy_measurement = format_class_measurement(measurements, "sana")
+            sick_measurement = format_class_measurement(measurements, "enferma")
+            st.markdown(
+                f"""
+                <div class="live-measurement-list">
+                  <div><strong>Sanas</strong><span>{escape(healthy_measurement)}</span></div>
+                  <div><strong>Enfermas</strong><span>{escape(sick_measurement)}</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if snapshot["last_error"]:
+            st.warning(f"Se conservó el video, pero un fotograma dio error: {snapshot['last_error']}")
+
+    # El fragmento refresca solamente el panel, sin reiniciar la cámara completa.
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every="1s")
+        def live_metrics_fragment() -> None:
+            render_metrics()
+
+        live_metrics_fragment()
+    else:
+        render_metrics()
+
+
+def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> None:
+    """Mantiene la cámara activa y ejecuta el tracker solo cuando el usuario lo inicia."""
     if not WEBRTC_AVAILABLE:
         st.error("No se pudo cargar el componente de cámara en vivo.")
         st.caption(
@@ -814,19 +976,24 @@ def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opa
         )
         return
 
-    st.markdown(
-        """
-        <section class="live-preview">
-          <div class="live-preview-header">
-            <span class="live-preview-dot"></span>
-            <strong>Cámara en vivo</strong>
-            <span class="live-preview-state">EN VIVO</span>
-          </div>
-          <div class="live-preview-footer">Pulsa <strong>INICIAR CÁMARA</strong>. Se mantendrá activa hasta que la detengas.</div>
-        </section>
-        """,
-        unsafe_allow_html=True,
+    state = get_live_session_state()
+    if "live_camera_requested" not in st.session_state:
+        st.session_state["live_camera_requested"] = False
+
+    camera_is_requested = st.session_state["live_camera_requested"]
+    resolution_label = st.selectbox(
+        "Resolución de captura de video",
+        list(LIVE_RESOLUTIONS),
+        index=1,
+        key="live_resolution_label",
+        disabled=camera_is_requested,
+        help=(
+            "La cámara ofrece hasta 2 MP en video. La opción Full HD solicita 1920 × 1080; "
+            "el navegador puede usar la resolución compatible más cercana."
+        ),
     )
+    resolution = LIVE_RESOLUTIONS[resolution_label]
+
     visible_masks = st.pills(
         "Controles de máscaras",
         ["Sanas", "Enfermas"],
@@ -837,66 +1004,130 @@ def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opa
     )
     show_healthy_masks = "Sanas" in visible_masks
     show_sick_masks = "Enfermas" in visible_masks
+    with state.lock:
+        state.show_healthy_masks = show_healthy_masks
+        state.show_sick_masks = show_sick_masks
 
-    if "live_camera_requested" not in st.session_state:
-        st.session_state["live_camera_requested"] = False
-    camera_action, camera_hint = st.columns([1.2, 3.8])
+    camera_action, detection_action, stop_action, camera_hint = st.columns(
+        [1.15, 1.25, 1.15, 2.45], gap="small"
+    )
     with camera_action:
-        camera_is_requested = st.session_state["live_camera_requested"]
         action_label = "Detener cámara" if camera_is_requested else "Iniciar cámara"
         if st.button(action_label, type="primary", key="live_camera_action", use_container_width=True):
-            st.session_state["live_camera_requested"] = not camera_is_requested
+            next_camera_state = not camera_is_requested
+            st.session_state["live_camera_requested"] = next_camera_state
+            if not next_camera_state:
+                state.set_detection_active(False)
+            st.rerun()
+    with detection_action:
+        detection_is_active = state.snapshot()["detection_active"]
+        if st.button(
+            "Iniciar detección",
+            type="primary",
+            key="live_detection_start",
+            use_container_width=True,
+            disabled=not camera_is_requested or detection_is_active,
+        ):
+            state.reset_metrics()
+            with LIVE_INFERENCE_LOCK:
+                reset_trackers(model)
+            state.set_detection_active(True)
+            st.rerun()
+    with stop_action:
+        if st.button(
+            "Detener detección",
+            key="live_detection_stop",
+            use_container_width=True,
+            disabled=not detection_is_active,
+        ):
+            state.set_detection_active(False)
             st.rerun()
     with camera_hint:
-        st.caption("Usa la cámara predeterminada del equipo. Puedes detenerla cuando quieras.")
+        if camera_is_requested:
+            st.caption("Detén la cámara para cambiar la resolución. La detección se inicia y se detiene con sus propios botones.")
+        else:
+            st.caption("Selecciona la resolución y pulsa Iniciar cámara. Después inicia la detección cuando la muestra esté lista.")
 
     model_names = {int(key): str(value) for key, value in model.names.items()}
-    frame_number = 0
-    cached_shape: tuple[int, ...] | None = None
-    cached_healthy_masks: np.ndarray | None = None
-    cached_sick_masks: np.ndarray | None = None
 
     def process_live_frame(frame: Any) -> Any:
-        nonlocal frame_number, cached_shape, cached_healthy_masks, cached_sick_masks
         image = frame.to_ndarray(format="bgr24")
         try:
-            frame_number += 1
+            with state.lock:
+                state.frame_number += 1
+                frame_number = state.frame_number
+                detection_active = state.detection_active
+                cached_shape = state.cached_shape
+                cached_healthy_masks = state.cached_healthy_masks
+                cached_sick_masks = state.cached_sick_masks
+                show_healthy = state.show_healthy_masks
+                show_sick = state.show_sick_masks
+
+            if not detection_active:
+                return frame
+
             needs_inference = (
                 cached_healthy_masks is None
                 or cached_sick_masks is None
                 or cached_shape != image.shape
-                or frame_number % LIVE_INFERENCE_EVERY_N_FRAMES == 1
+                or frame_number % resolution["inference_every"] == 1
             )
             if needs_inference:
                 with LIVE_INFERENCE_LOCK:
-                    result = model.predict(image, conf=confidence, imgsz=image_size, verbose=False)[0]
-                cached_shape = image.shape
-                cached_healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
-                cached_sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
+                    results = model.track(
+                        source=image,
+                        conf=confidence,
+                        imgsz=resolution["inference_size"],
+                        persist=True,
+                        tracker="bytetrack.yaml",
+                        verbose=False,
+                    )
+                if not results:
+                    return frame
+                result = results[0]
+                healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
+                sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
+                with state.lock:
+                    state.cached_shape = image.shape
+                    state.cached_healthy_masks = healthy_masks
+                    state.cached_sick_masks = sick_masks
+                    if state.calibration is None:
+                        state.calibration = calibration_from_image(image)
+                    update_track_votes(result, state.track_votes, model_names)
+                    collect_measurement_samples(result, model_names, state.measurement_samples)
+                    state.processed_frames += 1
+                    state.last_error = ""
+                cached_healthy_masks = healthy_masks
+                cached_sick_masks = sick_masks
 
             masks = np.zeros_like(image)
-            if show_healthy_masks:
+            if show_healthy and cached_healthy_masks is not None:
                 masks = cv2.bitwise_or(masks, cached_healthy_masks)
-            if show_sick_masks:
+            if show_sick and cached_sick_masks is not None:
                 masks = cv2.bitwise_or(masks, cached_sick_masks)
-            output = overlay_masks(image, masks, mask_opacity) if (show_healthy_masks or show_sick_masks) else image
+            output = overlay_masks(image, masks, mask_opacity) if (show_healthy or show_sick) else image
             return av.VideoFrame.from_ndarray(output, format="bgr24")
-        except Exception:
+        except Exception as error:
+            with state.lock:
+                state.last_error = f"{type(error).__name__}: {error}"
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
             return frame
 
     if st.session_state["live_camera_requested"]:
-        camera_column, status_column = st.columns([1.2, 1.0], gap="large")
+        camera_column, status_column = st.columns([1.8, 1.0], gap="large")
         with camera_column:
             webrtc_streamer(
-                key="cell_live_camera",
+                key=f"cell_live_camera_{resolution['width']}x{resolution['height']}",
                 mode=WebRtcMode.SENDRECV,
                 rtc_configuration=RTC_CONFIGURATION,
                 media_stream_constraints={
                     "video": {
-                        "width": {"ideal": 640},
-                        "height": {"ideal": 480},
-                        "frameRate": {"ideal": 24, "max": 24},
+                        "width": {"ideal": resolution["width"], "max": resolution["width"]},
+                        "height": {"ideal": resolution["height"], "max": resolution["height"]},
+                        "frameRate": {
+                            "ideal": resolution["frame_rate"],
+                            "max": resolution["frame_rate"],
+                        },
                     },
                     "audio": False,
                 },
@@ -907,8 +1138,8 @@ def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opa
                     "controls": False,
                     "muted": True,
                     "playsInline": True,
-                    "width": 640,
-                    "height": 480,
+                    "width": resolution["width"],
+                    "height": resolution["height"],
                     "style": {"width": "100%", "height": "auto", "borderRadius": "12px"},
                 },
                 translations={
@@ -921,23 +1152,14 @@ def render_live_camera(model: YOLO, confidence: float, image_size: int, mask_opa
                 },
             )
         with status_column:
-            st.markdown(
-                """
-                <aside class="live-status-panel">
-                  <span class="live-status-badge">CÁMARA ACTIVA</span>
-                  <h3>Monitoreo en vivo</h3>
-                  <p>Las máscaras seleccionadas se superponen directamente sobre la imagen.</p>
-                  <div class="live-status-row"><span>Modelo</span><strong>YOLO · segmentación</strong></div>
-                  <div class="live-status-row"><span>Resolución</span><strong>640 × 480</strong></div>
-                  <div class="live-status-row"><span>Actualización</span><strong>Continua</strong></div>
-                </aside>
-                """,
-                unsafe_allow_html=True,
-            )
-        st.caption("La segmentación se actualiza continuamente para mantener una vista fluida.")
+            render_live_metrics_panel(state, resolution_label)
+        st.caption(
+            "La captura usa la resolución seleccionada; la inferencia se ajusta internamente "
+            "para mantener una respuesta fluida."
+        )
     else:
         st.markdown(
-            '<div class="camera-idle">Pulsa <strong>Iniciar cámara</strong> para comenzar la detección en vivo.</div>',
+            '<div class="camera-idle">Pulsa <strong>Iniciar cámara</strong> para mostrar la vista previa. La detección comenzará solo cuando pulses <strong>Iniciar detección</strong>.</div>',
             unsafe_allow_html=True,
         )
 
@@ -1125,12 +1347,12 @@ def main() -> None:
             /* Se muestra solamente el área del video del componente de cámara;
                los controles se reemplazan por los botones turquesa de la app. */
             [data-testid="stCustomComponentV1"] {
-                max-height: 34rem !important;
+                max-height: 42rem !important;
                 overflow: hidden !important;
             }
             [data-testid="stCustomComponentV1"] iframe {
-                height: 34rem !important;
-                max-height: 34rem !important;
+                height: 42rem !important;
+                max-height: 42rem !important;
                 border-radius: 12px !important;
                 overflow: hidden !important;
             }
@@ -1192,10 +1414,10 @@ def main() -> None:
                 text-align: center;
             }
             .camera-idle strong { color: #ffffff; }
-            .live-status-panel {
+            .live-metrics-panel {
                 box-sizing: border-box;
-                min-height: 34rem;
-                padding: 1.5rem;
+                min-height: 9rem;
+                padding: 1.15rem 1.25rem;
                 background: #0a2745;
                 border: 1px solid #41d8cc;
                 border-radius: 14px;
@@ -1211,15 +1433,24 @@ def main() -> None:
                 font-weight: 800;
                 letter-spacing: 0.04em;
             }
-            .live-status-panel h3 {
-                margin: 1rem 0 0.45rem;
-                color: #ffffff;
-                font-size: 1.35rem;
+            .live-metrics-active {
+                background: rgba(18, 184, 194, 0.25);
+                color: #c4fffa;
             }
-            .live-status-panel p {
-                margin: 0 0 1.4rem;
+            .live-metrics-idle {
+                background: rgba(166, 216, 235, 0.12);
+                color: #a6d8eb;
+            }
+            .live-metrics-panel h3 {
+                margin: 0.8rem 0 0.35rem;
+                color: #ffffff;
+                font-size: 1.25rem;
+            }
+            .live-metrics-panel p {
+                margin: 0 0 0.7rem;
                 color: #a6d8eb !important;
                 line-height: 1.45;
+                font-size: 0.88rem;
             }
             .live-status-row {
                 display: flex;
@@ -1230,6 +1461,30 @@ def main() -> None:
             }
             .live-status-row span { color: #a6d8eb; font-size: 0.78rem; }
             .live-status-row strong { color: #ffffff; font-size: 0.95rem; }
+            .live-measurements-heading {
+                margin: 1rem 0 0.45rem;
+                color: #a6f5f0;
+                font-size: 0.88rem;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .live-measurement-list {
+                display: grid;
+                gap: 0.55rem;
+                margin-bottom: 0.75rem;
+            }
+            .live-measurement-list div {
+                display: flex;
+                flex-direction: column;
+                gap: 0.15rem;
+                padding: 0.55rem 0.7rem;
+                background: #0d3153;
+                border: 1px solid rgba(107, 191, 209, 0.58);
+                border-radius: 8px;
+            }
+            .live-measurement-list strong { color: #ffffff; font-size: 0.82rem; }
+            .live-measurement-list span { color: #e8ffff; font-size: 0.78rem; line-height: 1.35; }
             .mask-legend {
                 display: inline-flex;
                 align-items: center;
@@ -1423,7 +1678,7 @@ def main() -> None:
         st.stop()
 
     try:
-        model = load_model(str(model_path))
+        model = get_session_model(model_path)
     except Exception as error:
         st.error(f"No fue posible cargar el modelo: {error}")
         st.stop()
@@ -1443,7 +1698,7 @@ def main() -> None:
         "Sección de video", ["Cámara en vivo", "Subir video"], horizontal=True, key="video_section"
     )
     if video_section == "Cámara en vivo":
-        render_live_camera(model, confidence, LIVE_IMAGE_SIZE, mask_opacity)
+        render_live_camera(model, confidence, mask_opacity)
         return
 
     uploaded_video = st.file_uploader("Carga un video para analizar", type=["mp4", "avi", "mov", "mkv"])
