@@ -1338,18 +1338,21 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
 
     camera_is_requested = st.session_state["live_camera_requested"]
     completed_count = len(state.completed_samples_snapshot())
+    if "live_lot_name" not in st.session_state:
+        st.session_state["live_lot_name"] = "Lote sin nombre"
     lot_name = st.text_input(
         "Nombre de la piscina / lote",
         key="live_lot_name",
-        placeholder="Ej.: Piscina Norte 01",
         disabled=camera_is_requested or completed_count > 0,
         help="Este nombre aparecerá en el panel y en el reporte final.",
     ).strip()
     current_sample_number = min(completed_count + 1, MAX_LIVE_SAMPLES)
+    sample_code_key = f"live_sample_code_{current_sample_number}"
+    if sample_code_key not in st.session_state:
+        st.session_state[sample_code_key] = f"CAM-{current_sample_number:02d}"
     sample_code = st.text_input(
         f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
-        key=f"live_sample_code_{current_sample_number}",
-        placeholder="Ej.: PN01-CAM-001",
+        key=sample_code_key,
         disabled=state.snapshot()["detection_active"],
         help="Cada muestra debe tener un código para identificarla en el reporte.",
     ).strip()
@@ -1408,8 +1411,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 not camera_is_requested
                 or detection_is_active
                 or completed_count >= MAX_LIVE_SAMPLES
-                or not lot_name
-                or not sample_code
             ),
         ):
             state.reset_metrics()
@@ -1433,10 +1434,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             st.caption("Las cuatro muestras ya están completas. Descarga el reporte del lote al finalizar.")
         elif camera_is_requested and detection_is_active:
             st.caption("Al pulsar Detener y guardar muestra se registran las métricas del camarón actual.")
-        elif camera_is_requested and (not lot_name or not sample_code):
-            st.caption("Escribe el nombre del lote y el código del camarón antes de iniciar la detección.")
         elif camera_is_requested:
-            st.caption("La detección se inicia y se detiene con sus propios botones.")
+            st.caption("La detección se inicia y se detiene con sus propios botones. El código actual se guardará en el reporte.")
         else:
             st.caption("Selecciona la resolución, inicia la cámara y luego comienza la detección de la muestra.")
 
@@ -1559,6 +1558,14 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
         st.markdown(
             '<div class="camera-idle">Pulsa <strong>Iniciar cámara</strong> para mostrar la vista previa. La detección comenzará solo cuando pulses <strong>Iniciar detección</strong>.</div>',
             unsafe_allow_html=True,
+        )
+        render_live_metrics_panel(
+            state,
+            lot_name,
+            sample_code,
+            10.0,
+            30.0,
+            60.0,
         )
 
     render_live_sample_results(
