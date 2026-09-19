@@ -82,6 +82,7 @@ LIVE_RESOLUTIONS = {
         "inference_every": 5,
     },
 }
+MAX_LIVE_SAMPLES = 4
 
 # Colores BGR de las capas de segmentación.
 COLORS_BGR = {
@@ -308,6 +309,7 @@ class LiveSessionState:
     cached_healthy_masks: np.ndarray | None = None
     cached_sick_masks: np.ndarray | None = None
     last_error: str = ""
+    completed_samples: list[dict[str, Any]] = field(default_factory=list)
 
     def reset_metrics(self) -> None:
         """Limpia el conteo al iniciar una nueva captura."""
@@ -326,6 +328,52 @@ class LiveSessionState:
         with self.lock:
             self.detection_active = active
 
+    def clear_completed_samples(self) -> None:
+        with self.lock:
+            self.completed_samples = []
+
+    def save_current_sample(self, sample_code: str, lot_name: str) -> bool:
+        """Guarda las métricas acumuladas como una de las cuatro muestras."""
+        with self.lock:
+            if len(self.completed_samples) >= MAX_LIVE_SAMPLES or self.processed_frames <= 0:
+                return False
+
+            counts = summarize_tracks(self.track_votes)
+            measurements = (
+                summarize_measurement_samples(self.measurement_samples, self.calibration)
+                if self.calibration is not None
+                else None
+            )
+            sample_number = len(self.completed_samples) + 1
+            self.completed_samples.append(
+                {
+                    "sample_number": sample_number,
+                    "label": f"Camarón muestra {sample_number}",
+                    "code": sample_code.strip() or f"Muestra-{sample_number}",
+                    "lot_name": lot_name.strip() or "Lote sin nombre",
+                    "processed_frames": self.processed_frames,
+                    "counts": dict(counts),
+                    "measurements": measurements,
+                }
+            )
+            return True
+
+    def completed_samples_snapshot(self) -> list[dict[str, Any]]:
+        """Devuelve una copia de las muestras finalizadas para renderizar y descargar."""
+        with self.lock:
+            return [
+                {
+                    **sample,
+                    "counts": dict(sample["counts"]),
+                    "measurements": (
+                        dict(sample["measurements"])
+                        if sample.get("measurements") is not None
+                        else None
+                    ),
+                }
+                for sample in self.completed_samples
+            ]
+
     def snapshot(self) -> dict[str, Any]:
         """Obtiene una copia coherente de las métricas para el panel lateral."""
         with self.lock:
@@ -341,6 +389,7 @@ class LiveSessionState:
                 "measurements": measurements,
                 "processed_frames": self.processed_frames,
                 "last_error": self.last_error,
+                "completed_samples": len(self.completed_samples),
             }
 
 
@@ -502,6 +551,168 @@ def make_report_csv(
                     [f"{label}: diámetro promedio equivalente", f"{mean_diameter:.2f} µm"]
                 )
     return output.getvalue().encode("utf-8-sig")
+
+
+def aggregate_live_sample_metrics(
+    samples: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    """Suma los conteos y calcula promedios ponderados para todo el lote."""
+    counts = {"sana": 0, "enferma": 0, "otra": 0, "total": 0}
+    measurement_totals: dict[str, dict[str, float]] = {
+        category: {"count": 0.0, "area": 0.0, "perimeter": 0.0, "diameter": 0.0}
+        for category in ("sana", "enferma")
+    }
+
+    for sample in samples:
+        sample_counts = sample["counts"]
+        for key in counts:
+            counts[key] += int(sample_counts.get(key, 0))
+
+        measurements = sample.get("measurements")
+        if not measurements:
+            continue
+        for category in ("sana", "enferma"):
+            measured_count = int(measurements.get(f"{category}_measured_cells", 0) or 0)
+            if measured_count <= 0:
+                continue
+            bucket = measurement_totals[category]
+            bucket["count"] += measured_count
+            bucket["area"] += float(measurements[f"{category}_mean_area_um2"]) * measured_count
+            bucket["perimeter"] += float(measurements[f"{category}_mean_perimeter_um"]) * measured_count
+            bucket["diameter"] += float(
+                measurements[f"{category}_mean_equivalent_diameter_um"]
+            ) * measured_count
+
+    measured_cells = int(sum(bucket["count"] for bucket in measurement_totals.values()))
+    if not measured_cells:
+        return counts, None
+
+    aggregate_measurements: dict[str, Any] = {
+        "calibration_method": "Promedio ponderado de las muestras",
+        "measured_cells": measured_cells,
+    }
+    for category, bucket in measurement_totals.items():
+        measured_count = int(bucket["count"])
+        aggregate_measurements[f"{category}_measured_cells"] = measured_count
+        aggregate_measurements[f"{category}_mean_area_um2"] = (
+            bucket["area"] / measured_count if measured_count else None
+        )
+        aggregate_measurements[f"{category}_mean_perimeter_um"] = (
+            bucket["perimeter"] / measured_count if measured_count else None
+        )
+        aggregate_measurements[f"{category}_mean_equivalent_diameter_um"] = (
+            bucket["diameter"] / measured_count if measured_count else None
+        )
+    return counts, aggregate_measurements
+
+
+def sample_result_grade(
+    counts: dict[str, int], low_limit: float, medium_limit: float, high_limit: float
+) -> tuple[float, str, str]:
+    """Obtiene afectación y calificación para una muestra o para el lote."""
+    denominator = counts["sana"] + counts["enferma"]
+    affected_percentage = counts["enferma"] / denominator * 100 if denominator else 0.0
+    if denominator:
+        grade, description = grade_from_percentage(
+            affected_percentage, low_limit, medium_limit, high_limit
+        )
+    else:
+        grade, description = "Sin datos", "No se detectaron células clasificadas"
+    return affected_percentage, grade, description
+
+
+def make_live_samples_report_csv(
+    lot_name: str,
+    samples: list[dict[str, Any]],
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> bytes:
+    """Crea un reporte CSV con las cuatro muestras y el total del lote."""
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Nombre del lote / piscina", lot_name])
+    writer.writerow(["Muestras analizadas", f"{len(samples)} de {MAX_LIVE_SAMPLES}"])
+    writer.writerow([])
+    writer.writerow(
+        [
+            "Muestra",
+            "Código",
+            "Fotogramas analizados",
+            "Células sanas",
+            "Células enfermas",
+            "Total contabilizado",
+            "Afectación",
+            "Calificación",
+            "Descripción",
+        ]
+    )
+
+    for sample in samples:
+        counts = sample["counts"]
+        affected_percentage, grade, description = sample_result_grade(
+            counts, low_limit, medium_limit, high_limit
+        )
+        writer.writerow(
+            [
+                sample["label"],
+                sample["code"],
+                sample["processed_frames"],
+                counts["sana"],
+                counts["enferma"],
+                counts["total"],
+                f"{affected_percentage:.2f}%",
+                grade,
+                description,
+            ]
+        )
+
+    aggregate_counts, aggregate_measurements = aggregate_live_sample_metrics(samples)
+    aggregate_percentage, aggregate_grade, aggregate_description = sample_result_grade(
+        aggregate_counts, low_limit, medium_limit, high_limit
+    )
+    writer.writerow([])
+    writer.writerow(["MÉTRICA GENERAL DEL LOTE"])
+    writer.writerow(["Células sanas", aggregate_counts["sana"]])
+    writer.writerow(["Células enfermas", aggregate_counts["enferma"]])
+    writer.writerow(["Total contabilizado", aggregate_counts["total"]])
+    writer.writerow(["Afectación general", f"{aggregate_percentage:.2f}%"])
+    writer.writerow(["Calificación general", aggregate_grade])
+    writer.writerow(["Descripción general", aggregate_description])
+    if aggregate_measurements:
+        writer.writerow(["Células usadas para medición", aggregate_measurements["measured_cells"]])
+        for category, label in (("sana", "Sanas"), ("enferma", "Enfermas")):
+            count = int(aggregate_measurements[f"{category}_measured_cells"])
+            writer.writerow([f"{label} usadas para medición", count])
+            if count:
+                writer.writerow(
+                    [
+                        f"{label}: diámetro promedio",
+                        f"{aggregate_measurements[f'{category}_mean_equivalent_diameter_um']:.2f} µm",
+                    ]
+                )
+                writer.writerow(
+                    [
+                        f"{label}: perímetro promedio",
+                        f"{aggregate_measurements[f'{category}_mean_perimeter_um']:.2f} µm",
+                    ]
+                )
+                writer.writerow(
+                    [
+                        f"{label}: área promedio",
+                        f"{aggregate_measurements[f'{category}_mean_area_um2']:.2f} µm²",
+                    ]
+                )
+    return output.getvalue().encode("utf-8-sig")
+
+
+def live_report_filename(lot_name: str) -> str:
+    """Genera un nombre de archivo seguro y legible para el reporte del lote."""
+    safe_name = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in lot_name.strip()
+    ).strip("_")
+    return f"reporte_{safe_name or 'lote'}.csv"
 
 
 def show_summary(
@@ -902,55 +1113,116 @@ def render_photo_mode(
     )
 
 
-def render_live_metrics_panel(state: LiveSessionState, resolution_label: str) -> None:
-    """Muestra el conteo del tracker y las métricas que llegan del callback WebRTC."""
+def render_live_metrics_panel(
+    state: LiveSessionState,
+    lot_name: str,
+    current_sample_code: str,
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> None:
+    """Muestra las cuatro fichas de camarones y el acumulado del lote."""
+
+    def metric_card(
+        label: str,
+        code: str,
+        counts: dict[str, int],
+        measurements: dict[str, Any] | None,
+        low_limit: float,
+        medium_limit: float,
+        high_limit: float,
+        card_class: str = "",
+    ) -> str:
+        affected_percentage, grade, _ = sample_result_grade(
+            counts, low_limit, medium_limit, high_limit
+        )
+        measurement_text = ""
+        if measurements:
+            measurement_text = (
+                f'<div class="live-card-measurements">'
+                f"{escape(format_class_measurement(measurements, 'sana'))}<br>"
+                f"{escape(format_class_measurement(measurements, 'enferma'))}"
+                f"</div>"
+            )
+        return f"""
+        <article class="live-sample-card {card_class}">
+          <div class="live-sample-card-heading">
+            <strong>{escape(label)}</strong>
+            <span>Código: {escape(code)}</span>
+          </div>
+          <div class="live-card-grid">
+            <div><span>Sanas</span><strong>{counts['sana']}</strong></div>
+            <div><span>Enfermas</span><strong>{counts['enferma']}</strong></div>
+            <div><span>Total</span><strong>{counts['total']}</strong></div>
+            <div><span>Afectación</span><strong>{affected_percentage:.1f}%</strong></div>
+          </div>
+          <div class="live-card-grade"><span>Calificación</span><strong>{escape(grade)}</strong></div>
+          {measurement_text}
+        </article>
+        """
 
     def render_metrics() -> None:
         snapshot = state.snapshot()
+        completed_samples = state.completed_samples_snapshot()
         counts = snapshot["counts"]
-        denominator = counts["sana"] + counts["enferma"]
-        affected_percentage = counts["enferma"] / denominator * 100 if denominator else 0.0
         status = "DETECCIÓN ACTIVA" if snapshot["detection_active"] else "VISTA PREVIA"
         status_class = "live-metrics-active" if snapshot["detection_active"] else "live-metrics-idle"
+        sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
+        current_card = ""
+        if snapshot["detection_active"]:
+            current_card = metric_card(
+                f"Camarón muestra {sample_number} · en curso",
+                current_sample_code or "Código pendiente",
+                counts,
+                snapshot["measurements"],
+                low_limit,
+                medium_limit,
+                high_limit,
+                "live-current-card",
+            )
+
+        sample_cards = "".join(
+            metric_card(
+                sample["label"],
+                sample["code"],
+                sample["counts"],
+                sample.get("measurements"),
+                low_limit,
+                medium_limit,
+                high_limit,
+            )
+            for sample in completed_samples
+        )
+        aggregate_counts, aggregate_measurements = aggregate_live_sample_metrics(completed_samples)
+        aggregate_card = ""
+        if completed_samples:
+            aggregate_card = metric_card(
+                f"Métrica general del lote ({len(completed_samples)}/{MAX_LIVE_SAMPLES} muestras)",
+                "Acumulado",
+                aggregate_counts,
+                aggregate_measurements,
+                low_limit,
+                medium_limit,
+                high_limit,
+                "live-aggregate-card",
+            )
+
+        cards = current_card + sample_cards + aggregate_card
+        if not cards:
+            cards = '<p class="live-empty-metrics">Inicia la detección para ver las métricas de la muestra.</p>'
 
         st.markdown(
             f"""
             <section class="live-metrics-panel">
               <span class="live-status-badge {status_class}">{status}</span>
-              <h3>Métricas en vivo</h3>
-              <p>El tracker cuenta cada célula una sola vez mientras la detección está activa.</p>
-              <div class="live-status-row"><span>Resolución de captura</span><strong>{escape(resolution_label)}</strong></div>
-              <div class="live-status-row"><span>Fotogramas analizados</span><strong>{snapshot['processed_frames']:,}</strong></div>
+              <h3>Métricas del lote</h3>
+              <div class="live-status-row"><span>Nombre de la piscina / lote</span><strong>{escape(lot_name or 'Sin nombre')}</strong></div>
+              <div class="live-status-row"><span>Fotogramas de la muestra actual</span><strong>{snapshot['processed_frames']:,}</strong></div>
             </section>
+            <div class="live-sample-cards">{cards}</div>
             """,
             unsafe_allow_html=True,
         )
-
-        metric_row_one = st.columns(2)
-        with metric_row_one[0]:
-            st.metric("Células sanas", counts["sana"])
-        with metric_row_one[1]:
-            st.metric("Células enfermas", counts["enferma"])
-        metric_row_two = st.columns(2)
-        with metric_row_two[0]:
-            st.metric("Total contabilizado", counts["total"])
-        with metric_row_two[1]:
-            st.metric("Afectación", f"{affected_percentage:.1f}%")
-
-        measurements = snapshot["measurements"]
-        if measurements:
-            st.markdown('<div class="live-measurements-heading">Medidas promedio</div>', unsafe_allow_html=True)
-            healthy_measurement = format_class_measurement(measurements, "sana")
-            sick_measurement = format_class_measurement(measurements, "enferma")
-            st.markdown(
-                f"""
-                <div class="live-measurement-list">
-                  <div><strong>Sanas</strong><span>{escape(healthy_measurement)}</span></div>
-                  <div><strong>Enfermas</strong><span>{escape(sick_measurement)}</span></div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
         if snapshot["last_error"]:
             st.warning(f"Se conservó el video, pero un fotograma dio error: {snapshot['last_error']}")
@@ -964,6 +1236,90 @@ def render_live_metrics_panel(state: LiveSessionState, resolution_label: str) ->
         live_metrics_fragment()
     else:
         render_metrics()
+
+
+def render_live_sample_results(
+    state: LiveSessionState,
+    lot_name: str,
+    camera_is_requested: bool,
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> None:
+    """Muestra la tabla final y habilita el reporte al completar cuatro muestras."""
+    samples = state.completed_samples_snapshot()
+    if not samples:
+        return
+
+    rows: list[dict[str, Any]] = []
+    for sample in samples:
+        affected_percentage, grade, _ = sample_result_grade(
+            sample["counts"], low_limit, medium_limit, high_limit
+        )
+        rows.append(
+            {
+                "Muestra": sample["label"],
+                "Código": sample["code"],
+                "Sanas": sample["counts"]["sana"],
+                "Enfermas": sample["counts"]["enferma"],
+                "Total": sample["counts"]["total"],
+                "Afectación": f"{affected_percentage:.1f}%",
+                "Calificación": grade,
+            }
+        )
+
+    st.subheader(f"Muestras de {lot_name or 'lote sin nombre'}")
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+
+    aggregate_counts, aggregate_measurements = aggregate_live_sample_metrics(samples)
+    aggregate_percentage, aggregate_grade, aggregate_description = sample_result_grade(
+        aggregate_counts, low_limit, medium_limit, high_limit
+    )
+    st.markdown(
+        f"""
+        <section class="live-overall-summary">
+          <strong>Métrica general del lote</strong>
+          <span>{aggregate_counts['sana']} sanas · {aggregate_counts['enferma']} enfermas · {aggregate_counts['total']} células en total</span>
+          <span>{aggregate_percentage:.1f}% de afectación · {escape(aggregate_grade)} · {escape(aggregate_description)}</span>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if len(samples) == MAX_LIVE_SAMPLES:
+        report = make_live_samples_report_csv(
+            lot_name or "Lote sin nombre",
+            samples,
+            low_limit,
+            medium_limit,
+            high_limit,
+        )
+        st.download_button(
+            "Descargar reporte del lote (4 muestras)",
+            data=report,
+            file_name=live_report_filename(lot_name),
+            mime="text/csv",
+            use_container_width=True,
+            key="live_samples_report",
+        )
+    else:
+        st.info(f"Completa las {MAX_LIVE_SAMPLES} muestras para habilitar el reporte final del lote.")
+
+    if st.button(
+        "Nuevo lote / análisis",
+        key="live_new_analysis",
+        use_container_width=True,
+        disabled=camera_is_requested or state.snapshot()["detection_active"],
+    ):
+        state.set_detection_active(False)
+        state.reset_metrics()
+        state.clear_completed_samples()
+        st.session_state.pop("live_lot_name", None)
+        for key in list(st.session_state):
+            if key.startswith("live_sample_code_"):
+                st.session_state.pop(key, None)
+        st.session_state["live_camera_requested"] = False
+        st.rerun()
 
 
 def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> None:
@@ -981,6 +1337,26 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
         st.session_state["live_camera_requested"] = False
 
     camera_is_requested = st.session_state["live_camera_requested"]
+    completed_count = len(state.completed_samples_snapshot())
+    lot_name = st.text_input(
+        "Nombre de la piscina / lote",
+        key="live_lot_name",
+        placeholder="Ej.: Piscina Norte 01",
+        disabled=camera_is_requested or completed_count > 0,
+        help="Este nombre aparecerá en el panel y en el reporte final.",
+    ).strip()
+    current_sample_number = min(completed_count + 1, MAX_LIVE_SAMPLES)
+    sample_code = st.text_input(
+        f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
+        key=f"live_sample_code_{current_sample_number}",
+        placeholder="Ej.: PN01-CAM-001",
+        disabled=state.snapshot()["detection_active"],
+        help="Cada muestra debe tener un código para identificarla en el reporte.",
+    ).strip()
+    st.caption(
+        f"Se analizarán exactamente {MAX_LIVE_SAMPLES} camarones de este lote. "
+        f"Muestras finalizadas: {completed_count}/{MAX_LIVE_SAMPLES}."
+    )
     resolution_label = st.selectbox(
         "Resolución de captura de video",
         list(LIVE_RESOLUTIONS),
@@ -1011,22 +1387,30 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
     camera_action, detection_action, stop_action, camera_hint = st.columns(
         [1.15, 1.25, 1.15, 2.45], gap="small"
     )
+    detection_is_active = state.snapshot()["detection_active"]
     with camera_action:
         action_label = "Detener cámara" if camera_is_requested else "Iniciar cámara"
         if st.button(action_label, type="primary", key="live_camera_action", use_container_width=True):
             next_camera_state = not camera_is_requested
             st.session_state["live_camera_requested"] = next_camera_state
             if not next_camera_state:
-                state.set_detection_active(False)
+                if detection_is_active:
+                    state.set_detection_active(False)
+                    state.save_current_sample(sample_code, lot_name)
             st.rerun()
     with detection_action:
-        detection_is_active = state.snapshot()["detection_active"]
         if st.button(
             "Iniciar detección",
             type="primary",
             key="live_detection_start",
             use_container_width=True,
-            disabled=not camera_is_requested or detection_is_active,
+            disabled=(
+                not camera_is_requested
+                or detection_is_active
+                or completed_count >= MAX_LIVE_SAMPLES
+                or not lot_name
+                or not sample_code
+            ),
         ):
             state.reset_metrics()
             with LIVE_INFERENCE_LOCK:
@@ -1035,18 +1419,26 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             st.rerun()
     with stop_action:
         if st.button(
-            "Detener detección",
+            "Detener y guardar muestra",
             key="live_detection_stop",
             use_container_width=True,
             disabled=not detection_is_active,
         ):
             state.set_detection_active(False)
-            st.rerun()
+            if state.save_current_sample(sample_code, lot_name):
+                st.rerun()
+            st.warning("Aún no hay fotogramas analizados para guardar esta muestra.")
     with camera_hint:
-        if camera_is_requested:
-            st.caption("Detén la cámara para cambiar la resolución. La detección se inicia y se detiene con sus propios botones.")
+        if completed_count >= MAX_LIVE_SAMPLES:
+            st.caption("Las cuatro muestras ya están completas. Descarga el reporte del lote al finalizar.")
+        elif camera_is_requested and detection_is_active:
+            st.caption("Al pulsar Detener y guardar muestra se registran las métricas del camarón actual.")
+        elif camera_is_requested and (not lot_name or not sample_code):
+            st.caption("Escribe el nombre del lote y el código del camarón antes de iniciar la detección.")
+        elif camera_is_requested:
+            st.caption("La detección se inicia y se detiene con sus propios botones.")
         else:
-            st.caption("Selecciona la resolución y pulsa Iniciar cámara. Después inicia la detección cuando la muestra esté lista.")
+            st.caption("Selecciona la resolución, inicia la cámara y luego comienza la detección de la muestra.")
 
     model_names = {int(key): str(value) for key, value in model.names.items()}
 
@@ -1114,7 +1506,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             return frame
 
     if st.session_state["live_camera_requested"]:
-        camera_column, status_column = st.columns([1.8, 1.0], gap="large")
+        camera_column, status_column = st.columns([1.55, 1.45], gap="large")
         with camera_column:
             webrtc_streamer(
                 key=f"cell_live_camera_{resolution['width']}x{resolution['height']}",
@@ -1152,16 +1544,31 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 },
             )
         with status_column:
-            render_live_metrics_panel(state, resolution_label)
+            render_live_metrics_panel(
+                state,
+                lot_name,
+                sample_code,
+                10.0,
+                30.0,
+                60.0,
+            )
         st.caption(
-            "La captura usa la resolución seleccionada; la inferencia se ajusta internamente "
-            "para mantener una respuesta fluida."
+            "La inferencia se ajusta internamente para mantener una respuesta fluida."
         )
     else:
         st.markdown(
             '<div class="camera-idle">Pulsa <strong>Iniciar cámara</strong> para mostrar la vista previa. La detección comenzará solo cuando pulses <strong>Iniciar detección</strong>.</div>',
             unsafe_allow_html=True,
         )
+
+    render_live_sample_results(
+        state,
+        lot_name,
+        camera_is_requested,
+        10.0,
+        30.0,
+        60.0,
+    )
 
 
 def main() -> None:
@@ -1485,6 +1892,106 @@ def main() -> None:
             }
             .live-measurement-list strong { color: #ffffff; font-size: 0.82rem; }
             .live-measurement-list span { color: #e8ffff; font-size: 0.78rem; line-height: 1.35; }
+            .live-sample-cards {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.65rem;
+                margin-top: 0.7rem;
+            }
+            .live-sample-card {
+                min-width: 0;
+                padding: 0.75rem;
+                background: #0d3153;
+                border: 1px solid rgba(107, 191, 209, 0.62);
+                border-radius: 10px;
+                color: #ffffff;
+            }
+            .live-current-card {
+                border-color: #c4fffa;
+                box-shadow: 0 0 0 1px rgba(196, 255, 250, 0.18);
+            }
+            .live-aggregate-card {
+                background: #176b8a;
+                border: 2px solid #c4fffa;
+            }
+            .live-sample-card-heading {
+                display: flex;
+                flex-direction: column;
+                gap: 0.15rem;
+                margin-bottom: 0.55rem;
+            }
+            .live-sample-card-heading strong {
+                color: #ffffff;
+                font-size: 0.86rem;
+                line-height: 1.2;
+            }
+            .live-sample-card-heading span {
+                color: #a6f5f0;
+                font-size: 0.7rem;
+                overflow-wrap: anywhere;
+            }
+            .live-card-grid {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.38rem;
+            }
+            .live-card-grid div {
+                display: flex;
+                flex-direction: column;
+                gap: 0.1rem;
+                padding: 0.35rem;
+                background: rgba(6, 26, 51, 0.35);
+                border-radius: 6px;
+            }
+            .live-card-grid span, .live-card-grade span {
+                color: #a6d8eb;
+                font-size: 0.66rem;
+            }
+            .live-card-grid strong {
+                color: #ffffff;
+                font-size: 0.9rem;
+            }
+            .live-card-grade {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.4rem;
+                margin-top: 0.45rem;
+                padding-top: 0.45rem;
+                border-top: 1px solid rgba(107, 231, 218, 0.22);
+            }
+            .live-card-grade strong {
+                color: #c4fffa;
+                font-size: 0.8rem;
+                text-align: right;
+            }
+            .live-card-measurements {
+                margin-top: 0.45rem;
+                color: #e8ffff;
+                font-size: 0.65rem;
+                line-height: 1.35;
+            }
+            .live-empty-metrics {
+                margin: 0.7rem 0 0;
+                color: #a6d8eb;
+                font-size: 0.82rem;
+            }
+            .live-overall-summary {
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+                margin: 0.85rem 0;
+                padding: 0.9rem 1rem;
+                background: #176b8a;
+                border: 2px solid #c4fffa;
+                border-radius: 12px;
+                color: #ffffff;
+            }
+            .live-overall-summary strong { font-size: 1.05rem; }
+            .live-overall-summary span { color: #e8ffff; font-size: 0.88rem; }
+            @media (max-width: 1100px) {
+                .live-sample-cards { grid-template-columns: 1fr; }
+            }
             .mask-legend {
                 display: inline-flex;
                 align-items: center;
