@@ -238,7 +238,7 @@ def get_session_model(model_path: Path) -> YOLO:
     cached_model = st.session_state.get("cell_model")
     cached_model_path = st.session_state.get("cell_model_path")
     if cached_model is None or cached_model_path != model_key:
-        cached_model = load_model(model_key)
+        cached_model = load_model(model_path)
         st.session_state["cell_model"] = cached_model
         st.session_state["cell_model_path"] = model_key
     return cached_model
