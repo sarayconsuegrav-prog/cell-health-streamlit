@@ -1,5 +1,7 @@
 streamlit>=1.39,<2
 ultralytics>=8.3
+lap>=0.5.12
+openvino>=2025.2,<2026
 opencv-python-headless>=4.10
 numpy>=1.26
 tornado>=6.3,<7

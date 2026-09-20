@@ -21,6 +21,18 @@ El modelo revisado es de segmentación y declara estas clases:
 
 En ejecución local, la app usa `models/best.pt` si está disponible. En la versión publicada, el modelo se descarga automáticamente desde la release pública `v1.0.0`, por lo que no depende de rutas específicas de un equipo.
 
+### Backend OpenVINO para CPU
+
+La app intenta usar OpenVINO como backend para CPU y conserva PyTorch como respaldo automático. Para forzar una prueba local con un modelo ya convertido:
+
+```bash
+export CELL_MODEL_BACKEND=openvino
+export CELL_OPENVINO_MODEL_DIR="/ruta/a/best_openvino_model"
+streamlit run app.py
+```
+
+La carpeta OpenVINO debe contener los archivos `.xml` y `.bin` del modelo de segmentación. Si no se configura una carpeta, la app intenta convertir `best.pt` automáticamente y conserva la conversión en la caché temporal. También se puede configurar `CELL_OPENVINO_MODEL_URL` con un ZIP público de esa carpeta. Para forzar el backend anterior, usa `CELL_MODEL_BACKEND=pt`.
+
 Si se reemplaza el modelo local, conserva este nombre y ubicación:
 
 ```bash
