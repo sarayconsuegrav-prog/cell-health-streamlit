@@ -354,7 +354,7 @@ def draw_live_status_overlay(
     height, width = output.shape[:2]
     if not detection_active:
         return output
-    label = "EN VIVO"
+    label = "REC / EN VIVO"
     badge_color = (40, 40, 220)  # rojo en BGR
 
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -505,7 +505,12 @@ class LiveSessionState:
     show_healthy_masks: bool = True
     show_sick_masks: bool = True
     frame_number: int = 0
+    captured_frames: int = 0
     processed_frames: int = 0
+    recording_writer: Any | None = None
+    recording_path: Path | None = None
+    recording_size: tuple[int, int] | None = None
+    recorded_frames: int = 0
     track_votes: dict[int, Counter] = field(default_factory=lambda: defaultdict(Counter))
     measurement_samples: dict[str, dict[str, list[float]]] = field(default_factory=new_measurement_samples)
     calibration: dict[str, Any] | None = None
@@ -517,11 +522,61 @@ class LiveSessionState:
     last_error: str = ""
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
 
+    def _close_recording_locked(self, delete_file: bool = False) -> None:
+        """Cierra el archivo temporal actual sin borrar un video ya detenido."""
+        if self.recording_writer is not None:
+            self.recording_writer.release()
+            self.recording_writer = None
+        if delete_file and self.recording_path is not None:
+            try:
+                self.recording_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.recording_path = None
+        self.recording_size = None
+
+    def record_frame(self, frame: np.ndarray, fps: float) -> None:
+        """Escribe el fotograma mostrado en un MP4 temporal de baja carga."""
+        with self.lock:
+            if self.recording_writer is None:
+                recording_file = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                self.recording_path = Path(recording_file.name)
+                recording_file.close()
+                output_width = min(int(frame.shape[1]), VIDEO_OUTPUT_MAX_WIDTH)
+                output_height = max(1, round(frame.shape[0] * output_width / frame.shape[1]))
+                self.recording_size = (output_width, output_height)
+                self.recording_writer = cv2.VideoWriter(
+                    str(self.recording_path),
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    max(float(fps), 1.0),
+                    self.recording_size,
+                )
+                if not self.recording_writer.isOpened():
+                    self._close_recording_locked(delete_file=True)
+                    self.last_error = "No se pudo crear el video temporal de la muestra."
+                    return
+
+            output_frame = frame
+            if output_frame.shape[1] != self.recording_size[0] or output_frame.shape[0] != self.recording_size[1]:
+                output_frame = cv2.resize(
+                    output_frame,
+                    self.recording_size,
+                    interpolation=cv2.INTER_AREA,
+                )
+            try:
+                self.recording_writer.write(output_frame)
+                self.recorded_frames += 1
+            except Exception as error:
+                self.last_error = f"No se pudo grabar un fotograma: {error}"
+
     def reset_metrics(self) -> None:
         """Limpia el conteo al iniciar una nueva captura."""
         with self.lock:
+            self._close_recording_locked(delete_file=True)
             self.frame_number = 0
+            self.captured_frames = 0
             self.processed_frames = 0
+            self.recorded_frames = 0
             self.track_votes = defaultdict(Counter)
             self.measurement_samples = new_measurement_samples()
             self.calibration = None
@@ -537,15 +592,23 @@ class LiveSessionState:
             self.detection_active = active
             if not active:
                 self.inference_busy = False
+                self._close_recording_locked()
 
     def clear_completed_samples(self) -> None:
         with self.lock:
+            for sample in self.completed_samples:
+                recording_path = sample.get("recording_path")
+                if recording_path:
+                    try:
+                        Path(recording_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
             self.completed_samples = []
 
     def save_current_sample(self, sample_code: str, lot_name: str) -> bool:
         """Guarda las métricas acumuladas como una de las cuatro muestras."""
         with self.lock:
-            if len(self.completed_samples) >= MAX_LIVE_SAMPLES or self.processed_frames <= 0:
+            if len(self.completed_samples) >= MAX_LIVE_SAMPLES or self.captured_frames <= 0:
                 return False
 
             counts = summarize_tracks(self.track_votes)
@@ -561,11 +624,18 @@ class LiveSessionState:
                     "label": f"Camarón muestra {sample_number}",
                     "code": sample_code.strip() or f"Muestra-{sample_number}",
                     "lot_name": lot_name.strip() or "Lote sin nombre",
+                    "captured_frames": self.captured_frames,
                     "processed_frames": self.processed_frames,
+                    "recorded_frames": self.recorded_frames,
+                    "recording_path": str(self.recording_path) if self.recording_path else "",
                     "counts": dict(counts),
                     "measurements": measurements,
                 }
             )
+            # El archivo pasa a ser propiedad de la muestra guardada. El
+            # siguiente análisis solo podrá borrar su propio archivo temporal.
+            self.recording_path = None
+            self.recording_size = None
             return True
 
     def completed_samples_snapshot(self) -> list[dict[str, Any]]:
@@ -607,7 +677,10 @@ class LiveSessionState:
                 "detection_active": self.detection_active,
                 "counts": counts,
                 "measurements": measurements,
+                "captured_frames": self.captured_frames,
                 "processed_frames": self.processed_frames,
+                "recorded_frames": self.recorded_frames,
+                "recording_ready": bool(self.recording_path),
                 "inference_busy": self.inference_busy,
                 "last_error": self.last_error,
                 "completed_samples": len(self.completed_samples),
@@ -1498,7 +1571,7 @@ def render_live_metrics_panel(
         sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
         current_card = ""
         if snapshot["detection_active"] or (
-            snapshot["processed_frames"] > 0 and len(completed_samples) < MAX_LIVE_SAMPLES
+            snapshot["captured_frames"] > 0 and len(completed_samples) < MAX_LIVE_SAMPLES
         ):
             current_card = metric_card(
                 f"Camarón muestra {sample_number}",
@@ -1539,17 +1612,24 @@ def render_live_metrics_panel(
 
         cards = current_card + sample_cards + aggregate_card
         if not cards:
-            return
+            st.caption("Inicia la detección para comenzar a capturar la muestra.")
+        else:
+            st.markdown(
+                f"""
+                <div class="live-sample-cards">{cards}</div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        st.markdown(
-            f"""
-            <div class="live-sample-cards">{cards}</div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if snapshot["captured_frames"] > 0 or snapshot["detection_active"]:
+            status = "Grabando muestra" if snapshot["detection_active"] else "Muestra detenida"
+            st.caption(
+                f"{status} · {snapshot['captured_frames']:,} fotogramas capturados · "
+                f"{snapshot['processed_frames']:,} inferidos"
+            )
 
         if snapshot["last_error"]:
-            st.warning(f"Se conservó el video, pero un fotograma dio error: {snapshot['last_error']}")
+            st.warning(f"La cámara continúa, pero una inferencia dio error: {snapshot['last_error']}")
 
     # El fragmento refresca solamente el panel, sin reiniciar la cámara completa.
     if hasattr(st, "fragment"):
@@ -1818,7 +1898,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             disabled=(
                 detection_is_active
                 or completed_count >= MAX_LIVE_SAMPLES
-                or snapshot_after_action["processed_frames"] <= 0
+                or snapshot_after_action["captured_frames"] <= 0
             ),
         ):
             state.set_detection_active(False)
@@ -1889,6 +1969,12 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             if not detection_active:
                 return frame
 
+            # La captura se contabiliza antes de esperar a OpenVINO. Así,
+            # detener la sesión siempre deja una muestra guardable, incluso
+            # si una inferencia puntual tarda o devuelve cero detecciones.
+            with state.lock:
+                state.captured_frames += 1
+
             needs_inference = (
                 cached_healthy_masks is None
                 or cached_sick_masks is None
@@ -1922,6 +2008,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 output,
                 True,
             )
+            state.record_frame(output, resolution["frame_rate"])
             return av.VideoFrame.from_ndarray(output, format="bgr24")
         except Exception as error:
             with state.lock:
