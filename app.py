@@ -1656,6 +1656,7 @@ def render_live_sample_results(
         disabled=camera_is_requested or state.snapshot()["detection_active"],
     ):
         state.set_detection_active(False)
+        st.session_state["live_detection_requested"] = False
         state.reset_metrics()
         state.clear_completed_samples()
         st.session_state.pop("live_lot_name", None)
@@ -1679,6 +1680,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
     state = get_live_session_state()
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
+    if "live_detection_requested" not in st.session_state:
+        st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
 
     camera_is_requested = st.session_state["live_camera_requested"]
     completed_count = len(state.completed_samples_snapshot())
@@ -1763,7 +1766,9 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
     camera_action, detection_action, save_action = st.columns(
         [1.15, 1.25, 1.15], gap="small"
     )
-    detection_is_active = state.snapshot()["detection_active"]
+    detection_is_active = state.snapshot()["detection_active"] or bool(
+        st.session_state.get("live_detection_requested", False)
+    )
     with camera_action:
         action_label = "Detener cámara" if camera_is_requested else "Iniciar cámara"
         if st.button(action_label, type="primary", key="live_camera_action", use_container_width=True):
@@ -1771,12 +1776,16 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             st.session_state["live_camera_requested"] = next_camera_state
             if not next_camera_state:
                 state.set_detection_active(False)
+                st.session_state["live_detection_requested"] = False
             st.rerun()
 
     def toggle_live_detection() -> None:
         """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
-        if state.snapshot()["detection_active"]:
+        if state.snapshot()["detection_active"] or st.session_state.get(
+            "live_detection_requested", False
+        ):
             state.set_detection_active(False)
+            st.session_state["live_detection_requested"] = False
             return
 
         state.reset_metrics()
@@ -1784,6 +1793,10 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             reset_trackers(model)
         if lot_name:
             remember_pool(lot_name)
+        # El botón de detección también puede iniciar la cámara; así no queda
+        # bloqueado si el usuario todavía no pulsó "Iniciar cámara".
+        st.session_state["live_camera_requested"] = True
+        st.session_state["live_detection_requested"] = True
         state.set_detection_active(True)
 
     with detection_action:
@@ -1793,10 +1806,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             type="primary",
             key="live_detection_toggle",
             use_container_width=True,
-            disabled=(
-                not camera_is_requested
-                or completed_count >= MAX_LIVE_SAMPLES
-            ),
+            disabled=completed_count >= MAX_LIVE_SAMPLES,
             on_click=toggle_live_detection,
         )
     with save_action:
@@ -1812,6 +1822,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             ),
         ):
             state.set_detection_active(False)
+            st.session_state["live_detection_requested"] = False
             if lot_name:
                 remember_pool(lot_name)
             if state.save_current_sample(sample_code, lot_name):
