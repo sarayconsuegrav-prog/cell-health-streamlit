@@ -2659,11 +2659,19 @@ def main() -> None:
             [data-testid="stAlert"] { color: #ffffff; }
             .stButton > button, .stDownloadButton > button,
             button[kind="primary"], [data-testid="stBaseButton-primary"] {
-                background: #12b8c2 !important;
+                background: #0f7c86 !important;
                 color: #ffffff !important;
                 border: 1px solid #8ef4e8 !important;
                 font-weight: 750 !important;
                 min-height: 2.75rem;
+            }
+            .stButton > button:hover, .stDownloadButton > button:hover,
+            button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover,
+            .stButton > button:focus-visible, .stDownloadButton > button:focus-visible,
+            button[kind="primary"]:focus-visible, [data-testid="stBaseButton-primary"]:focus-visible {
+                background: #176b8a !important;
+                color: #ffffff !important;
+                border-color: #c4fffa !important;
             }
             button[kind="secondary"], [data-testid="stBaseButton-secondary"] {
                 background: #31546b !important;
@@ -2671,6 +2679,12 @@ def main() -> None:
                 border: 1px solid #6bbfd1 !important;
                 font-weight: 750 !important;
                 min-height: 2.75rem;
+            }
+            button[kind="secondary"]:hover, [data-testid="stBaseButton-secondary"]:hover,
+            button[kind="secondary"]:focus-visible, [data-testid="stBaseButton-secondary"]:focus-visible {
+                background: #176b8a !important;
+                color: #ffffff !important;
+                border-color: #c4fffa !important;
             }
             .stButton > button *, .stDownloadButton > button *,
             button[kind="primary"] *, [data-testid="stBaseButton-primary"] * {
@@ -2787,6 +2801,30 @@ def main() -> None:
                 color: #ffffff !important;
             }
             [data-testid="stPills"] button * { color: inherit !important; }
+            /* En Streamlit 1.64 los pills se renderizan como stButtonGroup.
+               Cubrir el contenedor real evita el rojo/blanco del tema base. */
+            [data-testid="stButtonGroup"] button {
+                background: #0d3153 !important;
+                border: 1px solid #41d8cc !important;
+                border-radius: 999px !important;
+                color: #ffffff !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stButtonGroup"] button:hover,
+            [data-testid="stButtonGroup"] button:focus-visible {
+                background: #176b8a !important;
+                border-color: #c4fffa !important;
+                color: #ffffff !important;
+                outline: none !important;
+            }
+            [data-testid="stButtonGroup"] button[aria-pressed="true"],
+            [data-testid="stButtonGroup"] button[aria-pressed="true"]:hover,
+            [data-testid="stButtonGroup"] button[aria-pressed="true"]:focus-visible {
+                background: #176b8a !important;
+                border-color: #c4fffa !important;
+                color: #ffffff !important;
+            }
+            [data-testid="stButtonGroup"] button * { color: inherit !important; }
             /* El video debe permanecer en WebRTC: así conserva la frecuencia
                de la cámara y no depende de reruns del WebSocket de Streamlit. */
             [data-testid="stCustomComponentV1"] {
