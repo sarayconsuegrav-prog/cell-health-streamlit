@@ -2199,7 +2199,6 @@ def render_live_camera(
                 },
                 "video_frame_callback": process_live_frame,
                 "async_processing": True,
-                "media_toggle_controls": True,
                 "video_html_attrs": {
                     "autoPlay": True,
                     "controls": False,
