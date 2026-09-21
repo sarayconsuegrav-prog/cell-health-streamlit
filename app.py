@@ -2054,17 +2054,6 @@ def render_live_camera(
         return
 
     state = get_live_session_state()
-    if str(st.query_params.get("debug", "")) == "1":
-        debug_snapshot = state.snapshot()
-        st.caption(
-            "DEBUG "
-            f"state={type(state).__name__} "
-            f"active={debug_snapshot['detection_active']} "
-            f"requested={st.session_state.get('live_detection_requested', False)} "
-            f"captured={debug_snapshot['captured_frames']} "
-            f"ready={debug_snapshot['sample_ready']} "
-            f"pending_session={'live_pending_sample' in st.session_state}"
-        )
     save_feedback = st.session_state.pop("live_save_feedback", "")
     if save_feedback:
         st.success(save_feedback)
@@ -2437,7 +2426,11 @@ def render_live_camera(
                     "audio": False,
                 },
                 "video_frame_callback": process_live_frame,
-                "async_processing": False,
+                # El callback solo entrega el último cuadro y agenda YOLO en
+                # otro hilo. La cola de un elemento evita que la inferencia
+                # lenta acumule retraso y memoria mientras la cámara continúa.
+                "async_processing": True,
+                "video_receiver_size": 1,
                 "sendback_video": True,
                 "sendback_audio": False,
                 "translations": {
