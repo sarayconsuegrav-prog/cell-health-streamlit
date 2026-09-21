@@ -1,0 +1,25 @@
+description: Ultralytics YOLO11m-seg model trained on /home/juan.gonzalez/proj/MCD/MF1/data_wssv_seg_optimized_md5.yaml
+author: Ultralytics
+date: '2026-09-20T18:38:09.411132'
+version: 8.4.93
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: segment
+head: Segment
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: celula_enferma
+  1: celula_sana
+args:
+  data: null
+  batch: 1
+  fraction: 1.0
+  quantize: null
+  dynamic: true
+  nms: false
+channels: 3
+end2end: false
