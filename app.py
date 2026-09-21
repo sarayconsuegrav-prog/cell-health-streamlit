@@ -1618,10 +1618,11 @@ def render_live_metrics_panel(
     def render_metrics() -> None:
         snapshot = state.snapshot()
         completed_samples = state.completed_samples_snapshot()
+        detection_requested = bool(st.session_state.get("live_detection_requested", False))
         counts = snapshot["counts"]
         sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
         current_card = ""
-        if snapshot["detection_active"] or (
+        if detection_requested or snapshot["detection_active"] or (
             snapshot["captured_frames"] > 0 and len(completed_samples) < MAX_LIVE_SAMPLES
         ):
             current_card = metric_card(
@@ -1672,8 +1673,12 @@ def render_live_metrics_panel(
                 unsafe_allow_html=True,
             )
 
-        if snapshot["captured_frames"] > 0 or snapshot["detection_active"]:
-            status = "Grabando muestra" if snapshot["detection_active"] else "Muestra detenida"
+        if snapshot["captured_frames"] > 0 or snapshot["detection_active"] or detection_requested:
+            status = (
+                "Grabando muestra"
+                if snapshot["detection_active"] or detection_requested
+                else "Muestra detenida"
+            )
             st.caption(
                 f"{status} · {snapshot['captured_frames']:,} fotogramas capturados · "
                 f"{snapshot['processed_frames']:,} inferidos"
@@ -1829,6 +1834,11 @@ def render_live_camera(
         st.session_state["live_camera_requested"] = False
     if "live_detection_requested" not in st.session_state:
         st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
+    if st.session_state["live_detection_requested"] and not state.snapshot()["detection_active"]:
+        # El componente WebRTC puede provocar un rerun mientras el callback
+        # del botón todavía termina. Recuperar aquí la bandera evita que el
+        # primer fotograma vea la detección como detenida.
+        state.set_detection_active(True)
 
     camera_is_requested = st.session_state["live_camera_requested"]
     completed_count = len(state.completed_samples_snapshot())
@@ -1986,7 +1996,9 @@ def render_live_camera(
             disabled=completed_count >= MAX_LIVE_SAMPLES,
             on_click=toggle_live_detection,
         )
-    if state.snapshot()["detection_active"]:
+    if state.snapshot()["detection_active"] or st.session_state.get(
+        "live_detection_requested", False
+    ):
         ensure_live_model()
     with save_action:
         snapshot_after_action = state.snapshot()
