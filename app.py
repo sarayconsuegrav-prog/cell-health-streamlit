@@ -2054,6 +2054,17 @@ def render_live_camera(
         return
 
     state = get_live_session_state()
+    if str(st.query_params.get("debug", "")) == "1":
+        debug_snapshot = state.snapshot()
+        st.caption(
+            "DEBUG "
+            f"state={type(state).__name__} "
+            f"active={debug_snapshot['detection_active']} "
+            f"requested={st.session_state.get('live_detection_requested', False)} "
+            f"captured={debug_snapshot['captured_frames']} "
+            f"ready={debug_snapshot['sample_ready']} "
+            f"pending_session={'live_pending_sample' in st.session_state}"
+        )
     save_feedback = st.session_state.pop("live_save_feedback", "")
     if save_feedback:
         st.success(save_feedback)
