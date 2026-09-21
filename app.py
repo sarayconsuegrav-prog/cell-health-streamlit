@@ -2376,11 +2376,13 @@ def render_live_camera(
                     unsafe_allow_html=True,
                 )
             else:
+                # Streamlit espera RGB para la imagen renderizada. El callback
+                # trabaja en BGR porque OpenCV/aiortc lo usa internamente.
+                preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
                 st.image(
-                    preview_frame,
-                    channels="BGR",
+                    preview_rgb,
+                    channels="RGB",
                     use_container_width=True,
-                    output_format="JPEG",
                 )
 
         # SENDONLY evita que streamlit-webrtc pinte su Placeholder blanco y
@@ -2768,9 +2770,30 @@ def main() -> None:
             /* El componente ajusta su propio alto cuando recibe el primer
                fotograma. No fijar el alto del iframe: hacerlo deja un aviso
                blanco separado del video durante la negociación WebRTC. */
+            /* WebRTC se usa como transporte de captura; el video visible lo
+               dibuja el panel Streamlit de abajo. Mantener el iframe montado
+               pero fuera de la vista evita la franja blanca del Placeholder
+               interno sin detener la cámara ni sus callbacks. */
+            [data-testid="stCustomComponentV1"] {
+                position: relative !important;
+                width: 1px !important;
+                height: 1px !important;
+                min-height: 1px !important;
+                max-height: 1px !important;
+                overflow: hidden !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
             [data-testid="stCustomComponentV1"] iframe {
-                width: 100% !important;
-                border-radius: 12px !important;
+                position: absolute !important;
+                left: -10000px !important;
+                top: 0 !important;
+                width: 1px !important;
+                height: 1px !important;
+                min-height: 1px !important;
+                max-height: 1px !important;
+                visibility: hidden !important;
+                border: 0 !important;
             }
             .live-preview {
                 max-width: 42rem;
