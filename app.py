@@ -2554,6 +2554,42 @@ def main() -> None:
                 opacity: 1 !important;
             }
             input, textarea { color: #ffffff !important; background: #0d3153 !important; }
+            /* Streamlit/BaseWeb vuelve a pintar estos controles con fondo blanco
+               durante los reruns de la cámara. Mantener contraste en todo momento. */
+            [data-testid="stTextInput"] > div > div,
+            [data-testid="stTextInput"] input {
+                background: #0d3153 !important;
+                color: #ffffff !important;
+                border-color: #6bbfd1 !important;
+                caret-color: #ffffff !important;
+            }
+            [data-testid="stTextInput"] input::placeholder {
+                color: #a6d8eb !important;
+                opacity: 1 !important;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+                background: #0d3153 !important;
+                border-color: #6bbfd1 !important;
+                color: #ffffff !important;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] div,
+            [data-testid="stSelectbox"] [data-baseweb="select"] span,
+            [data-testid="stSelectbox"] [data-baseweb="select"] input {
+                color: #ffffff !important;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] svg {
+                fill: #c4fffa !important;
+            }
+            [data-baseweb="popover"] [role="listbox"],
+            [data-baseweb="popover"] [role="option"] {
+                background: #0d3153 !important;
+                color: #ffffff !important;
+            }
+            [data-baseweb="popover"] [role="option"]:hover,
+            [data-baseweb="popover"] [aria-selected="true"] {
+                background: #176b8a !important;
+                color: #ffffff !important;
+            }
             [data-testid="stRadio"] div[role="radiogroup"] { gap: 0.5rem; }
             [data-testid="stRadio"] label {
                 background: #0d3153;
