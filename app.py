@@ -68,6 +68,8 @@ VIDEO_IMAGE_SIZE = 512
 LIVE_INFERENCE_EVERY_N_FRAMES = 3
 VIDEO_INFERENCE_STRIDE = 2
 VIDEO_OUTPUT_MAX_WIDTH = 1280
+LIVE_INFERENCE_RETRY_SECONDS = 2.0
+LIVE_RECORD_EVERY_N_FRAMES = 2
 # Las mediciones se usan para promedios; conservar cada observación de cada
 # fotograma puede hacer crecer la RAM sin mejorar de forma apreciable el reporte.
 MAX_MEASUREMENT_OBSERVATIONS = 2000
@@ -76,7 +78,7 @@ LIVE_RESOLUTIONS = {
         "width": 640,
         "height": 480,
         "frame_rate": 24,
-        "inference_size": 640,
+        "inference_size": 512,
         "inference_every": 3,
     },
     "1280 × 720 (HD)": {
@@ -525,6 +527,7 @@ class LiveSessionState:
     inference_busy: bool = False
     inference_generation: int = 0
     last_error: str = ""
+    inference_retry_at: float = 0.0
     inference_model: YOLO | None = None
     inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
@@ -593,6 +596,7 @@ class LiveSessionState:
             self.inference_generation += 1
             self.inference_busy = False
             self.last_error = ""
+            self.inference_retry_at = 0.0
 
     def set_detection_active(self, active: bool) -> None:
         with self.lock:
@@ -1771,12 +1775,13 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
         return
 
     state = get_live_session_state()
+    model_names = get_model_names(model)
     with state.lock:
         # El procesador WebRTC puede sobrevivir a un rerun de Streamlit; guardar
         # el modelo en el estado permite que detecte aun si el callback anterior
         # se creó antes de que el usuario pulsara "Iniciar detección".
         state.inference_model = model
-        state.inference_model_names = get_model_names(model)
+        state.inference_model_names = model_names
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
     if "live_detection_requested" not in st.session_state:
@@ -1838,7 +1843,7 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
     resolution_label = st.selectbox(
         "Resolución de captura de video",
         list(LIVE_RESOLUTIONS),
-        index=1,
+        index=0,
         key="live_resolution_label",
         disabled=camera_is_requested,
         help=(
@@ -1948,6 +1953,17 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                     verbose=False,
                 )
             if not results:
+                empty_mask = np.zeros_like(image)
+                with state.lock:
+                    if state.inference_generation == generation and state.detection_active:
+                        state.cached_shape = image.shape
+                        state.cached_healthy_masks = empty_mask
+                        state.cached_sick_masks = empty_mask.copy()
+                        if state.calibration is None:
+                            state.calibration = calibration_from_image(image)
+                        state.processed_frames += 1
+                        state.last_error = ""
+                        state.inference_retry_at = 0.0
                 return
 
             result = results[0]
@@ -1967,10 +1983,14 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 collect_measurement_samples(result, model_names, state.measurement_samples)
                 state.processed_frames += 1
                 state.last_error = ""
+                state.inference_retry_at = 0.0
         except Exception as error:
             with state.lock:
                 if state.inference_generation == generation:
                     state.last_error = f"{type(error).__name__}: {error}"
+                    # Evita crear un hilo nuevo por cada fotograma si el backend
+                    # devuelve un error rápido o tarda en preparar el predictor.
+                    state.inference_retry_at = time.monotonic() + LIVE_INFERENCE_RETRY_SECONDS
         finally:
             with state.lock:
                 if state.inference_generation == generation:
@@ -1990,6 +2010,7 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 inference_generation = state.inference_generation
                 show_healthy = state.show_healthy_masks
                 show_sick = state.show_sick_masks
+                inference_retry_at = state.inference_retry_at
 
             if not detection_active:
                 return frame
@@ -2006,7 +2027,11 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 or cached_shape != image.shape
                 or frame_number % resolution["inference_every"] == 1
             )
-            if needs_inference and not inference_busy:
+            if (
+                needs_inference
+                and not inference_busy
+                and time.monotonic() >= inference_retry_at
+            ):
                 # Solo se agenda un fotograma a la vez. El callback sigue
                 # entregando video mientras OpenVINO termina el fotograma.
                 with state.lock:
@@ -2033,7 +2058,11 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 output,
                 True,
             )
-            state.record_frame(output, resolution["frame_rate"])
+            if frame_number % LIVE_RECORD_EVERY_N_FRAMES == 1:
+                state.record_frame(
+                    output,
+                    resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
+                )
             return av.VideoFrame.from_ndarray(output, format="bgr24")
         except Exception as error:
             with state.lock:
