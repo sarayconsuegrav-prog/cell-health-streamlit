@@ -257,17 +257,19 @@ def get_model_names(model: YOLO) -> dict[int, str]:
     candidates: list[Any] = []
     try:
         candidates.append(model.names)
-    except AttributeError:
+    except Exception:
+        # Algunos backends OpenVINO fallan al inicializar el modelo al consultar
+        # `names`; usamos el metadato local como respaldo y no detenemos la app.
         pass
 
     try:
         backend_model = model.model
-    except AttributeError:
+    except Exception:
         backend_model = None
     if backend_model is not None:
         try:
             candidates.append(backend_model.names)
-        except AttributeError:
+        except Exception:
             pass
 
     for names in candidates:
