@@ -257,7 +257,11 @@ def get_model_names(model: YOLO) -> dict[int, str]:
     candidates: list[Any] = []
     try:
         candidates.append(model.names)
-    except AttributeError:
+    except Exception:
+        # Algunos backends OpenVINO inicializan el predictor al consultar
+        # ``names`` y pueden fallar al compilar el modelo en ese momento.
+        # La metadata incluida con el modelo ya contiene las clases correctas;
+        # no debemos dejar que esa consulta derribe toda la vista en vivo.
         pass
 
     try:
@@ -267,7 +271,7 @@ def get_model_names(model: YOLO) -> dict[int, str]:
     if backend_model is not None:
         try:
             candidates.append(backend_model.names)
-        except AttributeError:
+        except Exception:
             pass
 
     for names in candidates:
