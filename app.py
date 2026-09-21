@@ -890,7 +890,23 @@ class LiveSessionState:
 def get_live_session_state() -> LiveSessionState:
     """Crea un estado independiente para cada sesión del navegador."""
     state = st.session_state.get("live_session_state")
-    if not isinstance(state, LiveSessionState):
+    if isinstance(state, LiveSessionState):
+        return state
+
+    # Streamlit puede volver a ejecutar el script y redefinir la clase sin
+    # invalidar el objeto que ya vive en session_state. No debemos perder una
+    # muestra detenida solo porque su clase proviene de un rerun anterior.
+    compatible_state = state is not None and all(
+        callable(getattr(state, method_name, None))
+        for method_name in (
+            "snapshot",
+            "set_detection_active",
+            "reset_metrics",
+            "save_current_sample",
+            "completed_samples_snapshot",
+        )
+    )
+    if not compatible_state:
         state = LiveSessionState()
         persisted_samples = st.session_state.get("live_completed_samples")
         if isinstance(persisted_samples, list):
