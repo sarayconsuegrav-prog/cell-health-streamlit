@@ -2203,6 +2203,19 @@ def render_live_camera(
 
     def process_live_frame(frame: Any) -> Any:
         image: np.ndarray | None = None
+
+        def make_output_frame(output: np.ndarray) -> av.VideoFrame:
+            """Devuelve un cuadro reproducible y conserva su reloj WebRTC."""
+            output_frame = av.VideoFrame.from_ndarray(
+                np.ascontiguousarray(output),
+                format="bgr24",
+            )
+            # aiortc necesita conservar PTS/time_base para que Chrome pueda
+            # reproducir el track de salida de forma continua.
+            output_frame.pts = getattr(frame, "pts", None)
+            output_frame.time_base = getattr(frame, "time_base", None)
+            return output_frame
+
         try:
             image = frame.to_ndarray(format="bgr24")
             with state.lock:
@@ -2221,10 +2234,9 @@ def render_live_camera(
                 inference_retry_at = state.inference_retry_at
 
             if not detection_active:
-                # No reutilizar el objeto recibido por aiortc: en algunas
-                # versiones del componente eso incrementa los contadores,
-                # pero deja el video de salida en blanco en el navegador.
-                return av.VideoFrame.from_ndarray(image, format="bgr24")
+                # No reutilizar el objeto recibido por aiortc: el componente
+                # necesita un cuadro nuevo para entregar el video al navegador.
+                return make_output_frame(image)
 
             # La captura se contabiliza antes de esperar a OpenVINO. Así,
             # detener la sesión siempre deja una muestra guardable, incluso
@@ -2275,13 +2287,13 @@ def render_live_camera(
                     output,
                     resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
                 )
-            return av.VideoFrame.from_ndarray(output, format="bgr24")
+            return make_output_frame(output)
         except Exception as error:
             with state.lock:
                 state.last_error = f"{type(error).__name__}: {error}"
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
             if image is not None:
-                return av.VideoFrame.from_ndarray(image, format="bgr24")
+                return make_output_frame(image)
             return frame
 
     with camera_action_slot:
@@ -2314,7 +2326,10 @@ def render_live_camera(
                 "audio": False,
             },
             "video_frame_callback": process_live_frame,
-            "async_processing": True,
+            # El callback entrega el cuadro procesado inmediatamente. El modo
+            # asíncrono puede dejar el track remoto sin un primer cuadro visible
+            # mientras espera al worker, mostrando un recuadro blanco.
+            "async_processing": False,
             "video_html_attrs": {
                 "autoPlay": True,
                 "controls": False,
@@ -2322,7 +2337,12 @@ def render_live_camera(
                 "playsInline": True,
                 "width": resolution["width"],
                 "height": resolution["height"],
-                "style": {"width": "100%", "height": "auto", "borderRadius": "12px"},
+                "style": {
+                    "width": "100%",
+                    "height": "auto",
+                    "borderRadius": "12px",
+                    "backgroundColor": "#061a33",
+                },
             },
             "translations": {
                 "start": "INICIAR CÁMARA",
@@ -2662,17 +2682,12 @@ def main() -> None:
                 color: #ffffff !important;
             }
             [data-testid="stPills"] button * { color: inherit !important; }
-            /* Se muestra solamente el área del video del componente de cámara;
-               los controles se reemplazan por los botones turquesa de la app. */
-            [data-testid="stCustomComponentV1"] {
-                max-height: 42rem !important;
-                overflow: hidden !important;
-            }
+            /* El componente ajusta su propio alto cuando recibe el primer
+               fotograma. No fijar el alto del iframe: hacerlo deja un aviso
+               blanco separado del video durante la negociación WebRTC. */
             [data-testid="stCustomComponentV1"] iframe {
-                height: 42rem !important;
-                max-height: 42rem !important;
+                width: 100% !important;
                 border-radius: 12px !important;
-                overflow: hidden !important;
             }
             .live-preview {
                 max-width: 42rem;
