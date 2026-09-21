@@ -533,6 +533,16 @@ class LiveSessionState:
                 for sample in self.completed_samples
             ]
 
+    def update_completed_sample_code(self, sample_number: int, code: str) -> bool:
+        """Corrige el código de una muestra ya guardada."""
+        normalized_code = code.strip() or f"Muestra-{sample_number}"
+        with self.lock:
+            for sample in self.completed_samples:
+                if sample.get("sample_number") == sample_number:
+                    sample["code"] = normalized_code
+                    return True
+        return False
+
     def snapshot(self) -> dict[str, Any]:
         """Obtiene una copia coherente de las métricas para el panel lateral."""
         with self.lock:
@@ -1522,6 +1532,29 @@ def render_live_sample_results(
         unsafe_allow_html=True,
     )
 
+    with st.expander("Editar códigos guardados", expanded=False):
+        edited_codes: dict[int, str] = {}
+        with st.form("live_edit_sample_codes_form", clear_on_submit=False):
+            edit_columns = st.columns(2, gap="small")
+            for index, sample in enumerate(samples):
+                sample_number = int(sample["sample_number"])
+                field_key = f"live_edit_sample_code_{sample_number}"
+                if field_key not in st.session_state:
+                    st.session_state[field_key] = sample["code"]
+                with edit_columns[index % 2]:
+                    edited_codes[sample_number] = st.text_input(
+                        sample["label"],
+                        key=field_key,
+                    )
+            save_code_edits = st.form_submit_button(
+                "Guardar cambios",
+                use_container_width=True,
+            )
+        if save_code_edits:
+            for sample_number, code in edited_codes.items():
+                state.update_completed_sample_code(sample_number, code)
+            st.rerun()
+
     if len(samples) == MAX_LIVE_SAMPLES:
         report = make_live_samples_report_csv(
             lot_name or "Lote sin nombre",
@@ -1549,7 +1582,7 @@ def render_live_sample_results(
         state.clear_completed_samples()
         st.session_state.pop("live_lot_name", None)
         for key in list(st.session_state):
-            if key.startswith("live_sample_code_"):
+            if key.startswith(("live_sample_code_", "live_edit_sample_code_")):
                 st.session_state.pop(key, None)
         st.session_state["live_camera_requested"] = False
         st.rerun()
@@ -1586,7 +1619,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             "Piscina registrada",
             pool_options,
             key="live_pool_selector",
-            disabled=camera_is_requested or completed_count > 0,
+            disabled=completed_count > 0,
             help="Selecciona una piscina ya registrada o agrega una nueva a la lista.",
         )
         if selected_pool == NEW_POOL_OPTION:
@@ -1594,13 +1627,13 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 "Nombre o código de la nueva piscina",
                 key="live_new_pool_name",
                 placeholder="Ej.: Piscina Norte 01",
-                disabled=camera_is_requested or completed_count > 0,
+                disabled=completed_count > 0,
             )
             if st.button(
                 "Guardar piscina en la lista",
                 key="live_save_pool",
                 use_container_width=True,
-                disabled=camera_is_requested or completed_count > 0,
+                disabled=completed_count > 0,
             ):
                 registered_pool = remember_pool(new_pool_name)
                 if registered_pool:
@@ -1620,7 +1653,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
         sample_code = st.text_input(
             f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
             key=sample_code_key,
-            disabled=state.snapshot()["detection_active"],
             help="Cada muestra debe tener un código para identificarla en el reporte.",
         ).strip()
     resolution_label = st.selectbox(
@@ -1672,10 +1704,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             disabled=(
                 not camera_is_requested
                 or completed_count >= MAX_LIVE_SAMPLES
-                or (
-                    not detection_is_active
-                    and (not lot_name or not sample_code)
-                )
             ),
         ):
             if detection_is_active:
@@ -1702,6 +1730,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             ),
         ):
             state.set_detection_active(False)
+            if lot_name:
+                remember_pool(lot_name)
             if state.save_current_sample(sample_code, lot_name):
                 st.rerun()
 
