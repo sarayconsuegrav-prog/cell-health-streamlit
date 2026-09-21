@@ -527,6 +527,8 @@ class LiveSessionState:
     inference_busy: bool = False
     inference_generation: int = 0
     last_error: str = ""
+    inference_model: YOLO | None = None
+    inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
 
     def _close_recording_locked(self, delete_file: bool = False) -> None:
@@ -1771,6 +1773,12 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
         return
 
     state = get_live_session_state()
+    with state.lock:
+        # El procesador WebRTC puede sobrevivir a un rerun de Streamlit; guardar
+        # el modelo en el estado permite que detecte aun si el callback anterior
+        # se creó antes de que el usuario pulsara "Iniciar detección".
+        state.inference_model = model
+        state.inference_model_names = get_model_names(model)
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
     if "live_detection_requested" not in st.session_state:
@@ -1882,9 +1890,11 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
             return
 
         state.reset_metrics()
-        if model is not None:
+        with state.lock:
+            active_model = state.inference_model
+        if active_model is not None:
             with LIVE_INFERENCE_LOCK:
-                reset_trackers(model)
+                reset_trackers(active_model)
         if lot_name:
             remember_pool(lot_name)
         # El botón de detección también puede iniciar la cámara; así no queda
@@ -1922,15 +1932,16 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
             if state.save_current_sample(sample_code, lot_name):
                 st.rerun()
 
-    model_names = get_model_names(model)
-
     def run_live_inference(image: np.ndarray, generation: int) -> None:
         """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
         try:
-            if model is None:
+            with state.lock:
+                active_model = state.inference_model
+                model_names = dict(state.inference_model_names)
+            if active_model is None:
                 raise RuntimeError("El modelo aún no está listo; vuelve a iniciar la detección.")
             with LIVE_INFERENCE_LOCK:
-                results = model.track(
+                results = active_model.track(
                     source=image,
                     conf=confidence,
                     imgsz=resolution["inference_size"],
