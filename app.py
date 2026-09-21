@@ -2442,7 +2442,7 @@ def render_live_camera(
     )
     with detection_action:
         detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
-        st.button(
+        detection_button_clicked = st.button(
             detection_label,
             type="primary",
             key="live_detection_toggle",
@@ -2451,8 +2451,12 @@ def render_live_camera(
                 completed_count >= MAX_LIVE_SAMPLES
                 or not camera_requested
             ),
-            on_click=toggle_live_detection,
         )
+    if detection_button_clicked:
+        # Ejecutar el cambio en el cuerpo del rerun evita que el callback del
+        # botón compita con el callback WebRTC por el estado de la muestra.
+        toggle_live_detection()
+        st.rerun()
     if state.snapshot()["detection_active"] or st.session_state.get(
         "live_detection_requested", False
     ):
