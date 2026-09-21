@@ -1692,8 +1692,8 @@ def render_live_metrics_panel(
 
         if detection_requested and snapshot["camera_frames"] == 0:
             st.warning(
-                "La cámara todavía no entrega fotogramas. Autoriza el acceso y pulsa "
-                "INICIAR CÁMARA dentro del recuadro si aparece ese control."
+                "La cámara todavía no entrega fotogramas. Autoriza el acceso en el navegador "
+                "y pulsa INICIAR CÁMARA dentro del recuadro de video."
             )
 
         if snapshot["model_loading"]:
@@ -1716,7 +1716,7 @@ def render_live_metrics_panel(
 def render_live_sample_results(
     state: LiveSessionState,
     lot_name: str,
-    camera_is_requested: bool,
+    camera_is_playing: bool,
     low_limit: float,
     medium_limit: float,
     high_limit: float,
@@ -1804,7 +1804,7 @@ def render_live_sample_results(
         "Nuevo lote / análisis",
         key="live_new_analysis",
         use_container_width=True,
-        disabled=camera_is_requested or state.snapshot()["detection_active"],
+        disabled=camera_is_playing or state.snapshot()["detection_active"],
     ):
         state.set_detection_active(False)
         st.session_state["live_detection_requested"] = False
@@ -1814,7 +1814,7 @@ def render_live_sample_results(
         for key in list(st.session_state):
             if key.startswith(("live_sample_code_", "live_edit_sample_code_")):
                 st.session_state.pop(key, None)
-        st.session_state["live_camera_requested"] = False
+        st.session_state["live_camera_playing"] = False
         st.rerun()
 
 
@@ -1842,8 +1842,8 @@ def render_live_camera(
         if model is not None:
             state.inference_model = model
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
-    if "live_camera_requested" not in st.session_state:
-        st.session_state["live_camera_requested"] = False
+    if "live_camera_playing" not in st.session_state:
+        st.session_state["live_camera_playing"] = False
     if "live_detection_requested" not in st.session_state:
         st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
     if st.session_state["live_detection_requested"] and not state.snapshot()["detection_active"]:
@@ -1852,7 +1852,7 @@ def render_live_camera(
         # primer fotograma vea la detección como detenida.
         state.set_detection_active(True)
 
-    camera_is_requested = bool(st.session_state.get("live_camera_requested", False))
+    camera_is_playing = bool(st.session_state.get("live_camera_playing", False))
     completed_count = len(state.completed_samples_snapshot())
     saved_pools = get_saved_pools()
     if "live_pool_selector_pending" in st.session_state:
@@ -1910,7 +1910,7 @@ def render_live_camera(
         list(LIVE_RESOLUTIONS),
         index=0,
         key="live_resolution_label",
-        disabled=camera_is_requested,
+        disabled=camera_is_playing,
         help=(
             "La cámara ofrece hasta 2 MP en video. La opción Full HD solicita 1920 × 1080; "
             "el navegador puede usar la resolución compatible más cercana."
@@ -1932,26 +1932,13 @@ def render_live_camera(
         state.show_healthy_masks = show_healthy_masks
         state.show_sick_masks = show_sick_masks
 
-    camera_action, detection_action, save_action = st.columns(
-        [1.15, 1.25, 1.15], gap="small"
-    )
-    detection_is_active = state.snapshot()["detection_active"] or bool(
-        st.session_state.get("live_detection_requested", False)
-    )
-    with camera_action:
-        camera_label = "Detener cámara" if camera_is_requested else "Iniciar cámara"
-        if st.button(
-            camera_label,
-            type="primary",
-            key="live_camera_action",
-            use_container_width=True,
-        ):
-            next_camera_state = not camera_is_requested
-            st.session_state["live_camera_requested"] = next_camera_state
-            if not next_camera_state:
-                state.set_detection_active(False)
-                st.session_state["live_detection_requested"] = False
-            st.rerun()
+    # El navegador debe iniciar la cámara desde el control nativo de WebRTC:
+    # ese clic es el gesto de usuario que permite solicitar el permiso de cámara.
+    # Se reservan estos espacios para conservar los botones por encima del video
+    # aunque el componente se renderice más abajo y nos entregue su estado real.
+    detection_action, save_action = st.columns([1.25, 1.15], gap="small")
+    detection_action_slot = detection_action.empty()
+    save_action_slot = save_action.empty()
 
     def toggle_live_detection() -> None:
         """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
@@ -1970,7 +1957,7 @@ def render_live_camera(
                 reset_trackers(active_model)
         if lot_name:
             remember_pool(lot_name)
-        if not camera_is_requested:
+        if not bool(st.session_state.get("live_camera_playing", False)):
             st.session_state["live_detection_requested"] = False
             st.session_state["live_camera_start_required"] = True
             return
@@ -2003,43 +1990,6 @@ def render_live_camera(
                     state.inference_retry_at = time.monotonic() + LIVE_INFERENCE_RETRY_SECONDS
 
         Thread(target=load_in_background, daemon=True).start()
-
-    with detection_action:
-        detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
-        st.button(
-            detection_label,
-            type="primary",
-            key="live_detection_toggle",
-            use_container_width=True,
-            disabled=(
-                completed_count >= MAX_LIVE_SAMPLES
-                or not camera_is_requested
-            ),
-            help="Primero pulsa Iniciar cámara para habilitar la detección.",
-            on_click=toggle_live_detection,
-        )
-    if state.snapshot()["detection_active"] or st.session_state.get(
-        "live_detection_requested", False
-    ):
-        ensure_live_model()
-    with save_action:
-        snapshot_after_action = state.snapshot()
-        if st.button(
-            "Guardar muestra",
-            key="live_sample_save",
-            use_container_width=True,
-            disabled=(
-                detection_is_active
-                or completed_count >= MAX_LIVE_SAMPLES
-                or snapshot_after_action["captured_frames"] <= 0
-            ),
-        ):
-            state.set_detection_active(False)
-            st.session_state["live_detection_requested"] = False
-            if lot_name:
-                remember_pool(lot_name)
-            if state.save_current_sample(sample_code, lot_name):
-                st.rerun()
 
     def run_live_inference(image: np.ndarray, generation: int) -> None:
         """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
@@ -2212,26 +2162,19 @@ def render_live_camera(
                 "device_not_available": "No se encontró una cámara disponible.",
                 "device_access_denied": "Se denegó el acceso a la cámara.",
             },
-            # El botón externo es el único control de cámara visible. Esta
-            # opción hace que streamlit-webrtc oculte sus controles internos y
-            # siga el estado del botón "Iniciar cámara" / "Detener cámara".
-            "desired_playing_state": camera_is_requested,
         }
         camera_context = webrtc_streamer(**webrtc_options)
         camera_state = getattr(camera_context, "state", None)
         camera_playing = bool(getattr(camera_state, "playing", False))
+        st.session_state["live_camera_playing"] = camera_playing
         ice_state = str(getattr(camera_state, "ice_connection_state", ""))
         if camera_playing:
             st.session_state.pop("live_camera_start_required", None)
             st.success("Cámara activa")
-        elif camera_is_requested:
-            st.info(
-                "Iniciando cámara… si Chrome solicita permiso, selecciona **Permitir**."
-            )
         elif st.session_state.pop("live_camera_start_required", False):
-            st.warning("Primero pulsa **Iniciar cámara** para activar el video.")
+            st.warning("Primero pulsa **INICIAR CÁMARA** dentro del recuadro de video.")
         else:
-            st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
+            st.caption("Pulsa **INICIAR CÁMARA** dentro del recuadro para mostrar el video.")
         if ice_state.lower() in {"failed", "disconnected", "closed"}:
             st.warning(
                 "El navegador no pudo conectar el video. Revisa el permiso de cámara o "
@@ -2247,10 +2190,50 @@ def render_live_camera(
                 60.0,
             )
 
+    detection_is_active = state.snapshot()["detection_active"] or bool(
+        st.session_state.get("live_detection_requested", False)
+    )
+    with detection_action_slot:
+        detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
+        st.button(
+            detection_label,
+            type="primary",
+            key="live_detection_toggle",
+            use_container_width=True,
+            disabled=(
+                completed_count >= MAX_LIVE_SAMPLES
+                or not camera_playing
+            ),
+            help="Primero pulsa INICIAR CÁMARA dentro del video para habilitar la detección.",
+            on_click=toggle_live_detection,
+        )
+    if state.snapshot()["detection_active"] or st.session_state.get(
+        "live_detection_requested", False
+    ):
+        ensure_live_model()
+    with save_action_slot:
+        snapshot_after_action = state.snapshot()
+        if st.button(
+            "Guardar muestra",
+            key="live_sample_save",
+            use_container_width=True,
+            disabled=(
+                detection_is_active
+                or completed_count >= MAX_LIVE_SAMPLES
+                or snapshot_after_action["captured_frames"] <= 0
+            ),
+        ):
+            state.set_detection_active(False)
+            st.session_state["live_detection_requested"] = False
+            if lot_name:
+                remember_pool(lot_name)
+            if state.save_current_sample(sample_code, lot_name):
+                st.rerun()
+
     render_live_sample_results(
         state,
         lot_name,
-        camera_is_requested or camera_playing,
+        camera_playing,
         10.0,
         30.0,
         60.0,
