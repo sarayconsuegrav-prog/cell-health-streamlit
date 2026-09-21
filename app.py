@@ -864,21 +864,37 @@ class LiveSessionState:
     def snapshot(self) -> dict[str, Any]:
         """Obtiene una copia coherente de las métricas para el panel lateral."""
         with self.lock:
-            counts = summarize_tracks(self.track_votes)
-            measurements = (
-                summarize_measurement_samples(self.measurement_samples, self.calibration)
-                if self.calibration is not None
-                else None
-            )
+            pending_sample = self.pending_sample if self.sample_ready else None
+            if pending_sample is not None:
+                counts = dict(pending_sample["counts"])
+                measurements = (
+                    dict(pending_sample["measurements"])
+                    if pending_sample.get("measurements") is not None
+                    else None
+                )
+                captured_frames = int(pending_sample["captured_frames"])
+                processed_frames = int(pending_sample["processed_frames"])
+                recorded_frames = int(pending_sample["recorded_frames"])
+            else:
+                counts = summarize_tracks(self.track_votes)
+                measurements = (
+                    summarize_measurement_samples(self.measurement_samples, self.calibration)
+                    if self.calibration is not None
+                    else None
+                )
+                captured_frames = self.captured_frames
+                processed_frames = self.processed_frames
+                recorded_frames = self.recorded_frames
             return {
                 "detection_active": self.detection_active,
                 "counts": counts,
                 "measurements": measurements,
                 "camera_frames": self.camera_frames,
-                "captured_frames": self.captured_frames,
-                "processed_frames": self.processed_frames,
-                "recorded_frames": self.recorded_frames,
-                "recording_ready": bool(self.recording_path),
+                "captured_frames": captured_frames,
+                "processed_frames": processed_frames,
+                "recorded_frames": recorded_frames,
+                "recording_ready": bool(self.recording_path)
+                or bool(pending_sample and pending_sample.get("recording_path")),
                 "sample_ready": self.sample_ready,
                 "inference_busy": self.inference_busy,
                 "model_loading": self.model_loading,
@@ -911,6 +927,13 @@ def get_live_session_state() -> LiveSessionState:
         persisted_samples = st.session_state.get("live_completed_samples")
         if isinstance(persisted_samples, list):
             state.completed_samples = deepcopy(persisted_samples)
+        pending_sample = st.session_state.get("live_pending_sample")
+        if isinstance(pending_sample, dict) and pending_sample.get("captured_frames", 0) > 0:
+            state.pending_sample = deepcopy(pending_sample)
+            state.sample_ready = True
+            state.captured_frames = int(pending_sample.get("captured_frames", 0))
+            state.processed_frames = int(pending_sample.get("processed_frames", 0))
+            state.recorded_frames = int(pending_sample.get("recorded_frames", 0))
         st.session_state["live_session_state"] = state
     return state
 
@@ -918,6 +941,16 @@ def get_live_session_state() -> LiveSessionState:
 def persist_completed_live_samples(state: LiveSessionState) -> None:
     """Conserva una copia serializable para que un rerun no borre resultados."""
     st.session_state["live_completed_samples"] = state.completed_samples_snapshot()
+
+
+def persist_pending_live_sample(state: LiveSessionState) -> None:
+    """Conserva la muestra detenida aunque Streamlit reconstruya el estado."""
+    with state.lock:
+        pending_sample = deepcopy(state.pending_sample) if state.sample_ready else None
+    if pending_sample is None:
+        st.session_state.pop("live_pending_sample", None)
+    else:
+        st.session_state["live_pending_sample"] = pending_sample
 
 
 def normalize_pool_name(value: str) -> str:
@@ -1996,6 +2029,7 @@ def render_live_sample_results(
         state.reset_metrics()
         state.clear_completed_samples()
         st.session_state.pop("live_completed_samples", None)
+        st.session_state.pop("live_pending_sample", None)
         st.session_state.pop("live_lot_name", None)
         for key in list(st.session_state):
             if key.startswith(("live_sample_code_", "live_edit_sample_code_")):
@@ -2133,6 +2167,7 @@ def render_live_camera(
             # cerrada pero sus métricas siguen disponibles para guardarlas.
             if state.snapshot()["detection_active"]:
                 state.set_detection_active(False)
+                persist_pending_live_sample(state)
                 st.session_state["live_detection_requested"] = False
             st.session_state["live_camera_requested"] = False
             st.session_state["live_camera_playing"] = False
@@ -2146,10 +2181,12 @@ def render_live_camera(
             "live_detection_requested", False
         ):
             state.set_detection_active(False)
+            persist_pending_live_sample(state)
             st.session_state["live_detection_requested"] = False
             return
 
         state.reset_metrics()
+        st.session_state.pop("live_pending_sample", None)
         with state.lock:
             active_model = state.inference_model
         if active_model is not None:
@@ -2479,6 +2516,7 @@ def render_live_camera(
                 remember_pool(lot_name)
             if state.save_current_sample(sample_code, lot_name):
                 persist_completed_live_samples(state)
+                st.session_state.pop("live_pending_sample", None)
                 st.session_state["live_save_feedback"] = "Muestra guardada correctamente."
                 st.rerun()
             else:
