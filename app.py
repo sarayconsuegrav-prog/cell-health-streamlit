@@ -97,6 +97,12 @@ LIVE_RESOLUTIONS = {
 MAX_LIVE_SAMPLES = 4
 POOL_QUERY_KEY = "cell_pools"
 NEW_POOL_OPTION = "➕ Registrar nueva piscina"
+# OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
+# Estos son los nombres incluidos en `models/best_openvino_model/metadata.yaml`.
+DEFAULT_MODEL_NAMES = {
+    0: "celula_enferma",
+    1: "celula_sana",
+}
 
 # Colores BGR de las capas de segmentación.
 COLORS_BGR = {
@@ -238,6 +244,46 @@ def load_model(model_path: str | Path) -> YOLO:
     if path.is_dir():
         return YOLO(str(path), task="segment")
     return YOLO(str(path))
+
+
+def get_model_names(model: YOLO) -> dict[int, str]:
+    """Obtiene las clases tanto de YOLO/PyTorch como de ciertos backends OpenVINO.
+
+    Algunas versiones de Ultralytics cargan el modelo OpenVINO sin publicar
+    `names` a través de `YOLO.__getattr__`. En ese caso usamos las clases
+    declaradas en el modelo convertido para que la cámara y los videos sigan
+    clasificando las máscaras correctamente.
+    """
+    candidates: list[Any] = []
+    try:
+        candidates.append(model.names)
+    except AttributeError:
+        pass
+
+    try:
+        backend_model = model.model
+    except AttributeError:
+        backend_model = None
+    if backend_model is not None:
+        try:
+            candidates.append(backend_model.names)
+        except AttributeError:
+            pass
+
+    for names in candidates:
+        if isinstance(names, dict):
+            normalized = {}
+            for key, value in names.items():
+                try:
+                    normalized[int(key)] = str(value)
+                except (TypeError, ValueError):
+                    continue
+            if normalized:
+                return normalized
+        elif isinstance(names, (list, tuple)) and names:
+            return {index: str(value) for index, value in enumerate(names)}
+
+    return DEFAULT_MODEL_NAMES.copy()
 
 
 def get_session_model(model_path: Path) -> YOLO:
@@ -1035,7 +1081,7 @@ def process_image(
         raise ValueError("No fue posible leer la imagen. Usa PNG, JPG, JPEG o TIFF.")
 
     result = model.predict(image, conf=confidence, imgsz=image_size, verbose=False)[0]
-    model_names = {int(key): str(value) for key, value in model.names.items()}
+    model_names = get_model_names(model)
     healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
     sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
     measurements = measure_cells_from_scale_bar(result, model_names, image)
@@ -1105,7 +1151,7 @@ def process_video(
             raise RuntimeError("No se pudo crear el video de salida en formato MP4.")
 
         reset_trackers(model)
-        model_names = {int(key): str(value) for key, value in model.names.items()}
+        model_names = get_model_names(model)
         track_votes = defaultdict(Counter)
         tracked_detections = 0
         processed_frames = 0
@@ -1771,7 +1817,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             if state.save_current_sample(sample_code, lot_name):
                 st.rerun()
 
-    model_names = {int(key): str(value) for key, value in model.names.items()}
+    model_names = get_model_names(model)
 
     def run_live_inference(image: np.ndarray, generation: int) -> None:
         """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
