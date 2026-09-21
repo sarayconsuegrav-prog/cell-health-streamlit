@@ -490,9 +490,10 @@ def overlay_masks(image: np.ndarray, masks: np.ndarray, opacity: float) -> np.nd
 def draw_live_status_overlay(
     image: np.ndarray,
     detection_active: bool,
+    copy_output: bool = True,
 ) -> np.ndarray:
     """Dibuja una señal visible sobre el video para indicar el estado actual."""
-    output = image.copy()
+    output = image.copy() if copy_output else image
     height, width = output.shape[:2]
     if not detection_active:
         return output
@@ -670,7 +671,6 @@ class LiveSessionState:
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
     pending_sample: dict[str, Any] | None = None
     sample_ready: bool = False
-    latest_frame: np.ndarray | None = None
 
     def _close_recording_locked(self, delete_file: bool = False) -> None:
         """Cierra el archivo temporal actual sin borrar un video ya detenido."""
@@ -834,16 +834,6 @@ class LiveSessionState:
             self.pending_sample = None
             self.sample_ready = False
             return True
-
-    def set_latest_frame(self, frame: np.ndarray) -> None:
-        """Conserva solo el último cuadro para el visor Streamlit."""
-        with self.lock:
-            self.latest_frame = np.ascontiguousarray(frame).copy()
-
-    def latest_frame_snapshot(self) -> np.ndarray | None:
-        """Devuelve una copia segura del cuadro más reciente."""
-        with self.lock:
-            return self.latest_frame.copy() if self.latest_frame is not None else None
 
     def completed_samples_snapshot(self) -> list[dict[str, Any]]:
         """Devuelve una copia de las muestras finalizadas para renderizar y descargar."""
@@ -2279,9 +2269,6 @@ def render_live_camera(
                 inference_retry_at = state.inference_retry_at
 
             if not detection_active:
-                # No reutilizar el objeto recibido por aiortc: el componente
-                # necesita un cuadro nuevo para entregar el video al navegador.
-                state.set_latest_frame(image)
                 return make_output_frame(image)
 
             # La captura se contabiliza antes de esperar a OpenVINO. Así,
@@ -2318,29 +2305,40 @@ def render_live_camera(
                             daemon=True,
                         ).start()
 
-            masks = np.zeros_like(image)
-            if show_healthy and cached_healthy_masks is not None:
-                masks = cv2.bitwise_or(masks, cached_healthy_masks)
-            if show_sick and cached_sick_masks is not None:
-                masks = cv2.bitwise_or(masks, cached_sick_masks)
-            output = overlay_masks(image, masks, mask_opacity) if (show_healthy or show_sick) else image
+            mask_layers = [
+                cached_mask
+                for enabled, cached_mask in (
+                    (show_healthy, cached_healthy_masks),
+                    (show_sick, cached_sick_masks),
+                )
+                if enabled and cached_mask is not None
+            ]
+            if not mask_layers:
+                output = image
+            elif len(mask_layers) == 1:
+                output = overlay_masks(image, mask_layers[0], mask_opacity)
+            else:
+                output = overlay_masks(
+                    image,
+                    cv2.bitwise_or(mask_layers[0], mask_layers[1]),
+                    mask_opacity,
+                )
             output = draw_live_status_overlay(
                 output,
                 True,
+                copy_output=False,
             )
             if frame_number % LIVE_RECORD_EVERY_N_FRAMES == 1:
                 state.record_frame(
                     output,
                     resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
                 )
-            state.set_latest_frame(output)
             return make_output_frame(output)
         except Exception as error:
             with state.lock:
                 state.last_error = f"{type(error).__name__}: {error}"
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
             if image is not None:
-                state.set_latest_frame(image)
                 return make_output_frame(image)
             return frame
 
