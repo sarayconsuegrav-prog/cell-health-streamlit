@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 from html import escape
+import json
 import math
 import os
 import shutil
@@ -20,7 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any
 
 import cv2
@@ -89,6 +90,8 @@ LIVE_RESOLUTIONS = {
     },
 }
 MAX_LIVE_SAMPLES = 4
+POOL_QUERY_KEY = "cell_pools"
+NEW_POOL_OPTION = "➕ Registrar nueva piscina"
 
 # Colores BGR de las capas de segmentación.
 COLORS_BGR = {
@@ -291,6 +294,56 @@ def overlay_masks(image: np.ndarray, masks: np.ndarray, opacity: float) -> np.nd
     return output
 
 
+def draw_live_status_overlay(
+    image: np.ndarray,
+    detection_active: bool,
+    initializing: bool = False,
+) -> np.ndarray:
+    """Dibuja una señal visible sobre el video para indicar el estado actual."""
+    output = image.copy()
+    height, width = output.shape[:2]
+    if detection_active:
+        label = "INICIANDO DETECCION..." if initializing else "EN VIVO - DETECCION"
+        badge_color = (40, 40, 220)  # rojo en BGR
+    else:
+        label = "VISTA PREVIA"
+        badge_color = (180, 150, 45)  # azul/amarillo suave en BGR
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.48, min(0.82, width / 1500))
+    thickness = max(1, round(font_scale * 2))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, font, font_scale, thickness
+    )
+    left = max(12, round(width * 0.018))
+    top = max(12, round(height * 0.028))
+    padding_x = max(10, round(width * 0.012))
+    padding_y = max(8, round(height * 0.012))
+    badge_height = text_height + baseline + padding_y * 2
+    badge_width = text_width + padding_x * 3 + round(badge_height * 0.35)
+    right = min(width - 8, left + badge_width)
+    bottom = min(height - 8, top + badge_height)
+
+    background = output.copy()
+    cv2.rectangle(background, (left, top), (right, bottom), (5, 24, 47), -1)
+    output = cv2.addWeighted(background, 0.82, output, 0.18, 0)
+    center = (left + padding_x + round(badge_height * 0.17), top + badge_height // 2)
+    radius = max(5, round(badge_height * 0.16))
+    cv2.circle(output, center, radius, badge_color, -1, lineType=cv2.LINE_AA)
+    cv2.putText(
+        output,
+        label,
+        (left + padding_x * 2 + round(badge_height * 0.24), top + padding_y + text_height),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.rectangle(output, (left, top), (right, bottom), badge_color, 1, lineType=cv2.LINE_AA)
+    return output
+
+
 def update_track_votes(result: Any, votes: dict[int, Counter], model_names: dict[int, str]) -> int:
     """Registra la clase observada para cada ID único producido por el tracker."""
     if result.boxes is None or result.boxes.id is None:
@@ -411,6 +464,8 @@ class LiveSessionState:
     cached_shape: tuple[int, ...] | None = None
     cached_healthy_masks: np.ndarray | None = None
     cached_sick_masks: np.ndarray | None = None
+    inference_busy: bool = False
+    inference_generation: int = 0
     last_error: str = ""
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
 
@@ -425,11 +480,15 @@ class LiveSessionState:
             self.cached_shape = None
             self.cached_healthy_masks = None
             self.cached_sick_masks = None
+            self.inference_generation += 1
+            self.inference_busy = False
             self.last_error = ""
 
     def set_detection_active(self, active: bool) -> None:
         with self.lock:
             self.detection_active = active
+            if not active:
+                self.inference_busy = False
 
     def clear_completed_samples(self) -> None:
         with self.lock:
@@ -491,6 +550,7 @@ class LiveSessionState:
                 "counts": counts,
                 "measurements": measurements,
                 "processed_frames": self.processed_frames,
+                "inference_busy": self.inference_busy,
                 "last_error": self.last_error,
                 "completed_samples": len(self.completed_samples),
             }
@@ -503,6 +563,88 @@ def get_live_session_state() -> LiveSessionState:
         state = LiveSessionState()
         st.session_state["live_session_state"] = state
     return state
+
+
+def normalize_pool_name(value: str) -> str:
+    """Normaliza el nombre de una piscina para evitar duplicados accidentales."""
+    return " ".join(str(value).strip().split())
+
+
+def _unique_pool_names(values: list[Any]) -> list[str]:
+    """Conserva los nombres de piscina únicos respetando el orden de registro."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        name = normalize_pool_name(str(value))
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            unique.append(name)
+    return unique
+
+
+def get_saved_pools() -> list[str]:
+    """Obtiene las piscinas guardadas en la sesión y en la URL del navegador.
+
+    Streamlit Community Cloud no ofrece un disco persistente para datos de usuario.
+    La lista se conserva en ``st.session_state`` y también en un parámetro JSON de
+    la URL, de modo que vuelve a aparecer al recargar este enlace en el mismo
+    navegador. Más adelante puede sustituirse por una base de datos corporativa.
+    """
+    pools = st.session_state.get("saved_pools")
+    if isinstance(pools, list):
+        return pools
+
+    raw_value: Any = ""
+    try:
+        raw_value = st.query_params.get(POOL_QUERY_KEY, "")
+    except Exception:
+        raw_value = ""
+    if isinstance(raw_value, list):
+        raw_value = raw_value[-1] if raw_value else ""
+
+    loaded: list[Any] = []
+    if raw_value:
+        try:
+            decoded = json.loads(str(raw_value))
+            if isinstance(decoded, list):
+                loaded = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            loaded = []
+
+    pools = _unique_pool_names(loaded)
+    st.session_state["saved_pools"] = pools
+    return pools
+
+
+def persist_saved_pools(pools: list[str]) -> None:
+    """Guarda la lista de piscinas en la URL cuando el navegador lo permite."""
+    try:
+        if pools:
+            st.query_params[POOL_QUERY_KEY] = json.dumps(pools, ensure_ascii=False)
+        elif POOL_QUERY_KEY in st.query_params:
+            del st.query_params[POOL_QUERY_KEY]
+    except Exception:
+        # La lista de la sesión sigue funcionando aunque una versión antigua de
+        # Streamlit no exponga query_params.
+        pass
+
+
+def remember_pool(name: str) -> str:
+    """Registra una piscina nueva y devuelve el nombre normalizado."""
+    normalized = normalize_pool_name(name)
+    if not normalized:
+        return ""
+
+    pools = get_saved_pools()
+    for existing in pools:
+        if existing.casefold() == normalized.casefold():
+            return existing
+
+    pools.append(normalized)
+    st.session_state["saved_pools"] = pools
+    persist_saved_pools(pools)
+    return normalized
 
 
 def collect_measurement_samples(
@@ -1268,7 +1410,12 @@ def render_live_metrics_panel(
         snapshot = state.snapshot()
         completed_samples = state.completed_samples_snapshot()
         counts = snapshot["counts"]
-        status = "DETECCIÓN ACTIVA" if snapshot["detection_active"] else "VISTA PREVIA"
+        if snapshot["detection_active"] and snapshot["processed_frames"] == 0:
+            status = "INICIANDO DETECCIÓN"
+        elif snapshot["detection_active"]:
+            status = "DETECCIÓN ACTIVA"
+        else:
+            status = "VISTA PREVIA"
         status_class = "live-metrics-active" if snapshot["detection_active"] else "live-metrics-idle"
         sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
         current_card = ""
@@ -1441,24 +1588,60 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
 
     camera_is_requested = st.session_state["live_camera_requested"]
     completed_count = len(state.completed_samples_snapshot())
-    if "live_lot_name" not in st.session_state:
-        st.session_state["live_lot_name"] = "Lote sin nombre"
-    lot_name = st.text_input(
-        "Nombre de la piscina / lote",
-        key="live_lot_name",
-        disabled=camera_is_requested or completed_count > 0,
-        help="Este nombre aparecerá en el panel y en el reporte final.",
-    ).strip()
+    saved_pools = get_saved_pools()
+    if "live_pool_selector_pending" in st.session_state:
+        st.session_state["live_pool_selector"] = st.session_state.pop("live_pool_selector_pending")
+    if "live_pool_selector" not in st.session_state:
+        st.session_state["live_pool_selector"] = (
+            saved_pools[0] if saved_pools else NEW_POOL_OPTION
+        )
+    pool_options = [*saved_pools, NEW_POOL_OPTION]
+
+    pool_column, sample_column = st.columns([1.0, 1.0], gap="large")
+    with pool_column:
+        selected_pool = st.selectbox(
+            "Piscina registrada",
+            pool_options,
+            key="live_pool_selector",
+            disabled=camera_is_requested or completed_count > 0,
+            help="Selecciona una piscina ya registrada o agrega una nueva a la lista.",
+        )
+        if selected_pool == NEW_POOL_OPTION:
+            new_pool_name = st.text_input(
+                "Nombre o código de la nueva piscina",
+                key="live_new_pool_name",
+                placeholder="Ej.: Piscina Norte 01",
+                disabled=camera_is_requested or completed_count > 0,
+            )
+            if st.button(
+                "Guardar piscina en la lista",
+                key="live_save_pool",
+                use_container_width=True,
+                disabled=camera_is_requested or completed_count > 0,
+            ):
+                registered_pool = remember_pool(new_pool_name)
+                if registered_pool:
+                    st.session_state["live_pool_selector_pending"] = registered_pool
+                    st.rerun()
+                st.warning("Escribe un nombre o código para guardar la piscina.")
+            lot_name = normalize_pool_name(new_pool_name)
+        else:
+            lot_name = normalize_pool_name(selected_pool)
+        st.session_state["live_lot_name"] = lot_name
+        st.caption("Las piscinas guardadas vuelven a aparecer en este navegador.")
+
     current_sample_number = min(completed_count + 1, MAX_LIVE_SAMPLES)
     sample_code_key = f"live_sample_code_{current_sample_number}"
     if sample_code_key not in st.session_state:
         st.session_state[sample_code_key] = f"CAM-{current_sample_number:02d}"
-    sample_code = st.text_input(
-        f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
-        key=sample_code_key,
-        disabled=state.snapshot()["detection_active"],
-        help="Cada muestra debe tener un código para identificarla en el reporte.",
-    ).strip()
+    with sample_column:
+        sample_code = st.text_input(
+            f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
+            key=sample_code_key,
+            disabled=state.snapshot()["detection_active"],
+            help="Cada muestra debe tener un código para identificarla en el reporte.",
+        ).strip()
+        st.caption("Cada camarón conserva su código individual en el reporte.")
     st.caption(
         f"Se analizarán exactamente {MAX_LIVE_SAMPLES} camarones de este lote. "
         f"Muestras finalizadas: {completed_count}/{MAX_LIVE_SAMPLES}."
@@ -1514,13 +1697,20 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 not camera_is_requested
                 or detection_is_active
                 or completed_count >= MAX_LIVE_SAMPLES
+                or not lot_name
+                or not sample_code
             ),
         ):
             state.reset_metrics()
             with LIVE_INFERENCE_LOCK:
                 reset_trackers(model)
+            if lot_name:
+                remember_pool(lot_name)
             state.set_detection_active(True)
-            st.rerun()
+            detection_is_active = True
+            # No forzamos un rerun aquí: al conservar el componente WebRTC
+            # conectado, el callback recibe el siguiente fotograma de inmediato.
+            # El panel de métricas se actualiza mediante su propio fragmento.
     with stop_action:
         if st.button(
             "Detener y guardar muestra",
@@ -1537,6 +1727,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             st.caption("Las cuatro muestras ya están completas. Descarga el reporte del lote al finalizar.")
         elif camera_is_requested and detection_is_active:
             st.caption("Al pulsar Detener y guardar muestra se registran las métricas del camarón actual.")
+        elif camera_is_requested and (not lot_name or not sample_code):
+            st.caption("Selecciona o registra una piscina y escribe el código del camarón antes de iniciar.")
         elif camera_is_requested:
             st.caption("La detección se inicia y se detiene con sus propios botones. El código actual se guardará en el reporte.")
         else:
@@ -1544,9 +1736,50 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
 
     model_names = {int(key): str(value) for key, value in model.names.items()}
 
-    def process_live_frame(frame: Any) -> Any:
-        image = frame.to_ndarray(format="bgr24")
+    def run_live_inference(image: np.ndarray, generation: int) -> None:
+        """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
         try:
+            with LIVE_INFERENCE_LOCK:
+                results = model.track(
+                    source=image,
+                    conf=confidence,
+                    imgsz=resolution["inference_size"],
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    verbose=False,
+                )
+            if not results:
+                return
+
+            result = results[0]
+            healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
+            sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
+            with state.lock:
+                # Si el usuario detuvo o reinició la muestra mientras YOLO
+                # trabajaba, el resultado viejo no debe contaminar la siguiente.
+                if state.inference_generation != generation or not state.detection_active:
+                    return
+                state.cached_shape = image.shape
+                state.cached_healthy_masks = healthy_masks
+                state.cached_sick_masks = sick_masks
+                if state.calibration is None:
+                    state.calibration = calibration_from_image(image)
+                update_track_votes(result, state.track_votes, model_names)
+                collect_measurement_samples(result, model_names, state.measurement_samples)
+                state.processed_frames += 1
+                state.last_error = ""
+        except Exception as error:
+            with state.lock:
+                if state.inference_generation == generation:
+                    state.last_error = f"{type(error).__name__}: {error}"
+        finally:
+            with state.lock:
+                if state.inference_generation == generation:
+                    state.inference_busy = False
+
+    def process_live_frame(frame: Any) -> Any:
+        try:
+            image = frame.to_ndarray(format="bgr24")
             with state.lock:
                 state.frame_number += 1
                 frame_number = state.frame_number
@@ -1554,11 +1787,15 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 cached_shape = state.cached_shape
                 cached_healthy_masks = state.cached_healthy_masks
                 cached_sick_masks = state.cached_sick_masks
+                processed_frames = state.processed_frames
+                inference_busy = state.inference_busy
+                inference_generation = state.inference_generation
                 show_healthy = state.show_healthy_masks
                 show_sick = state.show_sick_masks
 
             if not detection_active:
-                return frame
+                preview = draw_live_status_overlay(image, False)
+                return av.VideoFrame.from_ndarray(preview, format="bgr24")
 
             needs_inference = (
                 cached_healthy_masks is None
@@ -1566,33 +1803,22 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 or cached_shape != image.shape
                 or frame_number % resolution["inference_every"] == 1
             )
-            if needs_inference:
-                with LIVE_INFERENCE_LOCK:
-                    results = model.track(
-                        source=image,
-                        conf=confidence,
-                        imgsz=resolution["inference_size"],
-                        persist=True,
-                        tracker="bytetrack.yaml",
-                        verbose=False,
-                    )
-                if not results:
-                    return frame
-                result = results[0]
-                healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
-                sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
+            if needs_inference and not inference_busy:
+                # Solo se agenda un fotograma a la vez. El callback sigue
+                # entregando video mientras OpenVINO termina el fotograma.
                 with state.lock:
-                    state.cached_shape = image.shape
-                    state.cached_healthy_masks = healthy_masks
-                    state.cached_sick_masks = sick_masks
-                    if state.calibration is None:
-                        state.calibration = calibration_from_image(image)
-                    update_track_votes(result, state.track_votes, model_names)
-                    collect_measurement_samples(result, model_names, state.measurement_samples)
-                    state.processed_frames += 1
-                    state.last_error = ""
-                cached_healthy_masks = healthy_masks
-                cached_sick_masks = sick_masks
+                    if (
+                        state.detection_active
+                        and not state.inference_busy
+                        and state.inference_generation == inference_generation
+                    ):
+                        state.inference_busy = True
+                        inference_busy = True
+                        Thread(
+                            target=run_live_inference,
+                            args=(image.copy(), inference_generation),
+                            daemon=True,
+                        ).start()
 
             masks = np.zeros_like(image)
             if show_healthy and cached_healthy_masks is not None:
@@ -1600,6 +1826,11 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             if show_sick and cached_sick_masks is not None:
                 masks = cv2.bitwise_or(masks, cached_sick_masks)
             output = overlay_masks(image, masks, mask_opacity) if (show_healthy or show_sick) else image
+            output = draw_live_status_overlay(
+                output,
+                True,
+                initializing=processed_frames == 0 or inference_busy,
+            )
             return av.VideoFrame.from_ndarray(output, format="bgr24")
         except Exception as error:
             with state.lock:
