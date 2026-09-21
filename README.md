@@ -16,6 +16,15 @@ También hace seguimiento de objetos para que el número final sea de células �
 
 La cámara en vivo usa WebRTC. La aplicación incluye servidores STUN públicos y acepta un servidor TURN opcional mediante Secrets de Streamlit. Si el navegador muestra **“Connection is taking longer than expected”** y el video queda en blanco, crea credenciales TURN en un proveedor como Metered o Twilio y agrega estos Secrets en **Manage app → Settings → Secrets**:
 
+Con Metered OpenRelay puedes guardar el nombre de tu aplicación y la API key; la app solicitará automáticamente las credenciales TURN temporales:
+
+```toml
+METERED_APP_NAME = "nombre_de_tu_app_metered"
+METERED_API_KEY = "tu_api_key_de_metered"
+```
+
+Como alternativa, también acepta credenciales TURN ya generadas:
+
 ```toml
 RTC_TURN_URLS = "turn:servidor:80,turn:servidor:443,turns:servidor:443?transport=tcp"
 RTC_TURN_USERNAME = "tu_usuario_turn"

@@ -24,6 +24,7 @@ from io import StringIO
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Callable
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -135,6 +136,26 @@ def runtime_setting(name: str) -> str:
     return str(secret_value).strip() or environment_value
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_metered_ice_servers(app_name: str, api_key: str) -> list[dict[str, Any]]:
+    """Obtiene credenciales TURN temporales de Metered sin exponer la API key."""
+    endpoint = (
+        f"https://{quote(app_name.strip(), safe='')}.metered.live/"
+        f"api/v1/turn/credentials?apiKey={quote(api_key.strip(), safe='')}"
+    )
+    try:
+        with urllib.request.urlopen(endpoint, timeout=8) as response:
+            payload = json.load(response)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+    if isinstance(payload, dict):
+        payload = payload.get("iceServers", payload.get("ice_servers", []))
+    if not isinstance(payload, list):
+        return []
+    return [server for server in payload if isinstance(server, dict)]
+
+
 def rtc_configuration() -> dict[str, Any]:
     """Construye ICE servers y añade TURN solo cuando el despliegue lo configura."""
     ice_servers = [dict(server) for server in DEFAULT_ICE_SERVERS]
@@ -149,6 +170,11 @@ def rtc_configuration() -> dict[str, Any]:
         except (TypeError, ValueError, json.JSONDecodeError):
             st.warning("RTC_ICE_SERVERS_JSON no tiene un formato JSON válido; se usará STUN.")
         return {"iceServers": ice_servers}
+
+    metered_app_name = runtime_setting("METERED_APP_NAME")
+    metered_api_key = runtime_setting("METERED_API_KEY")
+    if metered_app_name and metered_api_key:
+        ice_servers.extend(fetch_metered_ice_servers(metered_app_name, metered_api_key))
 
     turn_urls = [
         url.strip()
