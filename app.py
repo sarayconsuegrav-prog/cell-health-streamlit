@@ -248,6 +248,36 @@ def load_model(model_path: str | Path) -> YOLO:
     return YOLO(str(path))
 
 
+def load_live_model(model_path: str | Path) -> YOLO:
+    """Carga el modelo de cámara sin depender del estado de Streamlit.
+
+    La cámara se mantiene renderizada mientras este trabajo ocurre en segundo
+    plano. Esto evita que el primer clic de «Iniciar detección» bloquee el
+    componente WebRTC mientras OpenVINO compila el modelo.
+    """
+    try:
+        loaded_model = load_model(model_path)
+    except Exception as error:
+        if MODEL_BACKEND in {"openvino", "ov"} and Path(model_path).is_dir():
+            fallback_path = default_pt_model_path()
+            try:
+                loaded_model = load_model(fallback_path)
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    "No fue posible cargar OpenVINO ni el respaldo `.pt`: "
+                    f"{fallback_error}"
+                ) from error
+        else:
+            raise
+
+    if loaded_model.task != "segment":
+        raise RuntimeError(
+            f"El modelo cargado es de tipo `{loaded_model.task}`. "
+            "Esta aplicación requiere un modelo de segmentación."
+        )
+    return loaded_model
+
+
 def get_model_names(model: YOLO | None) -> dict[int, str]:
     """Obtiene las clases tanto de YOLO/PyTorch como de ciertos backends OpenVINO.
 
@@ -530,6 +560,7 @@ class LiveSessionState:
     inference_generation: int = 0
     last_error: str = ""
     inference_retry_at: float = 0.0
+    model_loading: bool = False
     inference_model: YOLO | None = None
     inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
@@ -695,6 +726,7 @@ class LiveSessionState:
                 "recorded_frames": self.recorded_frames,
                 "recording_ready": bool(self.recording_path),
                 "inference_busy": self.inference_busy,
+                "model_loading": self.model_loading,
                 "last_error": self.last_error,
                 "completed_samples": len(self.completed_samples),
             }
@@ -1647,6 +1679,9 @@ def render_live_metrics_panel(
                 f"{snapshot['processed_frames']:,} inferidos"
             )
 
+        if snapshot["model_loading"]:
+            st.caption("Preparando el modelo… el video continúa grabándose.")
+
         if snapshot["last_error"]:
             st.warning(f"La cámara continúa, pero una inferencia dio error: {snapshot['last_error']}")
 
@@ -1766,7 +1801,12 @@ def render_live_sample_results(
         st.rerun()
 
 
-def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: float) -> None:
+def render_live_camera(
+    model: YOLO | None,
+    confidence: float,
+    mask_opacity: float,
+    model_loader: Callable[[], YOLO] | None = None,
+) -> None:
     """Mantiene la cámara activa y ejecuta el tracker solo cuando el usuario lo inicia."""
     if not WEBRTC_AVAILABLE:
         st.error("No se pudo cargar el componente de cámara en vivo.")
@@ -1777,13 +1817,14 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
         return
 
     state = get_live_session_state()
-    model_names = get_model_names(model)
+    model_names = get_model_names(model) if model is not None else None
     with state.lock:
         # El procesador WebRTC puede sobrevivir a un rerun de Streamlit; guardar
         # el modelo en el estado permite que detecte aun si el callback anterior
         # se creó antes de que el usuario pulsara "Iniciar detección".
-        state.inference_model = model
-        state.inference_model_names = model_names
+        if model is not None:
+            state.inference_model = model
+            state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
     if "live_detection_requested" not in st.session_state:
@@ -1908,6 +1949,33 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
         st.session_state["live_detection_requested"] = True
         state.set_detection_active(True)
 
+    def ensure_live_model() -> None:
+        """Prepara YOLO en segundo plano sin detener el flujo de la cámara."""
+        if model_loader is None:
+            return
+        with state.lock:
+            if state.inference_model is not None or state.model_loading:
+                return
+            state.model_loading = True
+
+        def load_in_background() -> None:
+            try:
+                loaded_model = model_loader()
+                loaded_names = get_model_names(loaded_model)
+                with state.lock:
+                    state.inference_model = loaded_model
+                    state.inference_model_names = loaded_names
+                    state.model_loading = False
+                    state.inference_retry_at = 0.0
+                    state.last_error = ""
+            except Exception as error:
+                with state.lock:
+                    state.model_loading = False
+                    state.last_error = f"{type(error).__name__}: {error}"
+                    state.inference_retry_at = time.monotonic() + LIVE_INFERENCE_RETRY_SECONDS
+
+        Thread(target=load_in_background, daemon=True).start()
+
     with detection_action:
         detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
         st.button(
@@ -1918,6 +1986,8 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
             disabled=completed_count >= MAX_LIVE_SAMPLES,
             on_click=toggle_live_detection,
         )
+    if state.snapshot()["detection_active"]:
+        ensure_live_model()
     with save_action:
         snapshot_after_action = state.snapshot()
         if st.button(
@@ -2009,6 +2079,7 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 cached_healthy_masks = state.cached_healthy_masks
                 cached_sick_masks = state.cached_sick_masks
                 inference_busy = state.inference_busy
+                active_model_available = state.inference_model is not None
                 inference_generation = state.inference_generation
                 show_healthy = state.show_healthy_masks
                 show_sick = state.show_sick_masks
@@ -2031,6 +2102,7 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
             )
             if (
                 needs_inference
+                and active_model_available
                 and not inference_busy
                 and time.monotonic() >= inference_retry_at
             ):
@@ -2760,12 +2832,20 @@ def main() -> None:
         "Sección de video", ["Cámara en vivo", "Subir video"], horizontal=True, key="video_section"
     )
     if video_section == "Cámara en vivo":
-        detection_requested = bool(
-            st.session_state.get("live_detection_requested", False)
-            or get_live_session_state().snapshot()["detection_active"]
+        # La carga/compilación de OpenVINO se inicia en segundo plano después
+        # de pulsar «Iniciar detección». La vista WebRTC debe seguir dibujándose
+        # para que capture fotogramas desde el primer clic.
+        model = st.session_state.get("cell_model")
+
+        def load_live_model_for_session() -> YOLO:
+            return load_live_model(model_path)
+
+        render_live_camera(
+            model,
+            confidence,
+            mask_opacity,
+            model_loader=load_live_model_for_session,
         )
-        model = get_app_model() if detection_requested else None
-        render_live_camera(model, confidence, mask_opacity)
         return
 
     uploaded_video = st.file_uploader("Carga un video para analizar", type=["mp4", "avi", "mov", "mkv"])
