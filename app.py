@@ -7,6 +7,7 @@ segmentación, sin cajas delimitadoras ni etiquetas.
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 import gc
 import hashlib
 from html import escape
@@ -667,7 +668,9 @@ class LiveSessionState:
     inference_model: YOLO | None = None
     inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
+    pending_sample: dict[str, Any] | None = None
     sample_ready: bool = False
+    latest_frame: np.ndarray | None = None
 
     def _close_recording_locked(self, delete_file: bool = False) -> None:
         """Cierra el archivo temporal actual sin borrar un video ya detenido."""
@@ -735,7 +738,30 @@ class LiveSessionState:
             self.inference_busy = False
             self.last_error = ""
             self.inference_retry_at = 0.0
+            self.pending_sample = None
             self.sample_ready = False
+
+    def _freeze_current_sample_locked(self) -> None:
+        """Congela el resultado al detener para que el guardado no dependa del callback."""
+        if self.captured_frames <= 0:
+            self.pending_sample = None
+            self.sample_ready = False
+            return
+
+        measurements = (
+            summarize_measurement_samples(self.measurement_samples, self.calibration)
+            if self.calibration is not None
+            else None
+        )
+        self.pending_sample = {
+            "captured_frames": self.captured_frames,
+            "processed_frames": self.processed_frames,
+            "recorded_frames": self.recorded_frames,
+            "recording_path": str(self.recording_path) if self.recording_path else "",
+            "counts": dict(summarize_tracks(self.track_votes)),
+            "measurements": dict(measurements) if measurements is not None else None,
+        }
+        self.sample_ready = True
 
     def set_detection_active(self, active: bool) -> None:
         with self.lock:
@@ -743,7 +769,7 @@ class LiveSessionState:
             if not active:
                 self.inference_busy = False
                 self._close_recording_locked()
-                self.sample_ready = self.captured_frames > 0
+                self._freeze_current_sample_locked()
 
     def clear_completed_samples(self) -> None:
         with self.lock:
@@ -759,15 +785,15 @@ class LiveSessionState:
     def save_current_sample(self, sample_code: str, lot_name: str) -> bool:
         """Guarda las métricas acumuladas como una de las cuatro muestras."""
         with self.lock:
-            if len(self.completed_samples) >= MAX_LIVE_SAMPLES or self.captured_frames <= 0:
+            if len(self.completed_samples) >= MAX_LIVE_SAMPLES:
                 return False
 
-            counts = summarize_tracks(self.track_votes)
-            measurements = (
-                summarize_measurement_samples(self.measurement_samples, self.calibration)
-                if self.calibration is not None
-                else None
-            )
+            if self.pending_sample is None:
+                self._freeze_current_sample_locked()
+            if self.pending_sample is None:
+                return False
+
+            pending_sample = self.pending_sample
             sample_number = len(self.completed_samples) + 1
             self.completed_samples.append(
                 {
@@ -775,12 +801,16 @@ class LiveSessionState:
                     "label": f"Camarón muestra {sample_number}",
                     "code": sample_code.strip() or f"Muestra-{sample_number}",
                     "lot_name": lot_name.strip() or "Lote sin nombre",
-                    "captured_frames": self.captured_frames,
-                    "processed_frames": self.processed_frames,
-                    "recorded_frames": self.recorded_frames,
-                    "recording_path": str(self.recording_path) if self.recording_path else "",
-                    "counts": dict(counts),
-                    "measurements": measurements,
+                    "captured_frames": pending_sample["captured_frames"],
+                    "processed_frames": pending_sample["processed_frames"],
+                    "recorded_frames": pending_sample["recorded_frames"],
+                    "recording_path": pending_sample["recording_path"],
+                    "counts": dict(pending_sample["counts"]),
+                    "measurements": (
+                        dict(pending_sample["measurements"])
+                        if pending_sample.get("measurements") is not None
+                        else None
+                    ),
                 }
             )
             # El archivo pasa a ser propiedad de la muestra guardada. El
@@ -801,8 +831,19 @@ class LiveSessionState:
             self.inference_busy = False
             self.last_error = ""
             self.inference_retry_at = 0.0
+            self.pending_sample = None
             self.sample_ready = False
             return True
+
+    def set_latest_frame(self, frame: np.ndarray) -> None:
+        """Conserva solo el último cuadro para el visor Streamlit."""
+        with self.lock:
+            self.latest_frame = np.ascontiguousarray(frame).copy()
+
+    def latest_frame_snapshot(self) -> np.ndarray | None:
+        """Devuelve una copia segura del cuadro más reciente."""
+        with self.lock:
+            return self.latest_frame.copy() if self.latest_frame is not None else None
 
     def completed_samples_snapshot(self) -> list[dict[str, Any]]:
         """Devuelve una copia de las muestras finalizadas para renderizar y descargar."""
@@ -861,8 +902,16 @@ def get_live_session_state() -> LiveSessionState:
     state = st.session_state.get("live_session_state")
     if not isinstance(state, LiveSessionState):
         state = LiveSessionState()
+        persisted_samples = st.session_state.get("live_completed_samples")
+        if isinstance(persisted_samples, list):
+            state.completed_samples = deepcopy(persisted_samples)
         st.session_state["live_session_state"] = state
     return state
+
+
+def persist_completed_live_samples(state: LiveSessionState) -> None:
+    """Conserva una copia serializable para que un rerun no borre resultados."""
+    st.session_state["live_completed_samples"] = state.completed_samples_snapshot()
 
 
 def normalize_pool_name(value: str) -> str:
@@ -1911,6 +1960,7 @@ def render_live_sample_results(
         if save_code_edits:
             for sample_number, code in edited_codes.items():
                 state.update_completed_sample_code(sample_number, code)
+            persist_completed_live_samples(state)
             st.rerun()
 
     if len(samples) == MAX_LIVE_SAMPLES:
@@ -1939,6 +1989,7 @@ def render_live_sample_results(
         st.session_state["live_detection_requested"] = False
         state.reset_metrics()
         state.clear_completed_samples()
+        st.session_state.pop("live_completed_samples", None)
         st.session_state.pop("live_lot_name", None)
         for key in list(st.session_state):
             if key.startswith(("live_sample_code_", "live_edit_sample_code_")):
@@ -1963,6 +2014,9 @@ def render_live_camera(
         return
 
     state = get_live_session_state()
+    save_feedback = st.session_state.pop("live_save_feedback", "")
+    if save_feedback:
+        st.success(save_feedback)
     model_names = get_model_names(model) if model is not None else None
     with state.lock:
         # El procesador WebRTC puede sobrevivir a un rerun de Streamlit; guardar
@@ -2103,7 +2157,7 @@ def render_live_camera(
                 reset_trackers(active_model)
         if lot_name:
             remember_pool(lot_name)
-        if not bool(st.session_state.get("live_camera_playing", False)):
+        if not bool(st.session_state.get("live_camera_requested", False)):
             st.session_state["live_detection_requested"] = False
             st.session_state["live_camera_start_required"] = True
             return
@@ -2233,6 +2287,7 @@ def render_live_camera(
             if not detection_active:
                 # No reutilizar el objeto recibido por aiortc: el componente
                 # necesita un cuadro nuevo para entregar el video al navegador.
+                state.set_latest_frame(image)
                 return make_output_frame(image)
 
             # La captura se contabiliza antes de esperar a OpenVINO. Así,
@@ -2284,12 +2339,14 @@ def render_live_camera(
                     output,
                     resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
                 )
+            state.set_latest_frame(output)
             return make_output_frame(output)
         except Exception as error:
             with state.lock:
                 state.last_error = f"{type(error).__name__}: {error}"
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
             if image is not None:
+                state.set_latest_frame(image)
                 return make_output_frame(image)
             return frame
 
@@ -2309,61 +2366,78 @@ def render_live_camera(
 
     camera_column, status_column = st.columns([1.55, 1.45], gap="large")
     with camera_column:
-        webrtc_options: dict[str, Any] = {
-            "key": "cell_live_camera",
-            "mode": WebRtcMode.SENDRECV,
-            "desired_playing_state": camera_requested,
-            "rtc_configuration": rtc_configuration(),
-            "media_stream_constraints": {
-                "video": {
-                    "width": {"ideal": resolution["width"]},
-                    "height": {"ideal": resolution["height"]},
-                    "frameRate": {"ideal": resolution["frame_rate"]},
+        def render_camera_preview() -> None:
+            preview_frame = state.latest_frame_snapshot()
+            if preview_frame is None:
+                st.markdown(
+                    '<div class="live-video-placeholder">'
+                    "Esperando la señal de la cámara…"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.image(
+                    preview_frame,
+                    channels="BGR",
+                    use_container_width=True,
+                    output_format="JPEG",
+                )
+
+        # SENDONLY evita que streamlit-webrtc pinte su Placeholder blanco y
+        # sus controles internos. El cuadro procesado se muestra con Streamlit
+        # a partir del último frame recibido por el callback.
+        camera_playing = False
+        ice_state = ""
+        if camera_requested:
+            webrtc_options: dict[str, Any] = {
+                "key": "cell_live_camera",
+                "mode": WebRtcMode.SENDONLY,
+                "desired_playing_state": True,
+                "rtc_configuration": rtc_configuration(),
+                "media_stream_constraints": {
+                    "video": {
+                        "width": {"ideal": resolution["width"]},
+                        "height": {"ideal": resolution["height"]},
+                        "frameRate": {"ideal": resolution["frame_rate"]},
+                    },
+                    "audio": False,
                 },
-                "audio": False,
-            },
-            "video_frame_callback": process_live_frame,
-            # El callback entrega el cuadro procesado inmediatamente. El modo
-            # asíncrono puede dejar el track remoto sin un primer cuadro visible
-            # mientras espera al worker, mostrando un recuadro blanco.
-            "async_processing": False,
-            "video_html_attrs": {
-                "autoPlay": True,
-                "controls": False,
-                "muted": True,
-                "playsInline": True,
-                "width": resolution["width"],
-                "height": resolution["height"],
-                "style": {
-                    "width": "100%",
-                    "height": "auto",
-                    "borderRadius": "12px",
-                    "backgroundColor": "#061a33",
+                "video_frame_callback": process_live_frame,
+                "async_processing": False,
+                "sendback_video": False,
+                "sendback_audio": False,
+                "translations": {
+                    "device_ask_permission": "Autoriza el acceso a la cámara para comenzar.",
+                    "device_not_available": "No se encontró una cámara disponible.",
+                    "device_access_denied": "Se denegó el acceso a la cámara.",
                 },
-            },
-            "translations": {
-                "start": "INICIAR CÁMARA",
-                "stop": "DETENER CÁMARA",
-                "select_device": "ELEGIR CÁMARA",
-                "device_ask_permission": "Autoriza el acceso a la cámara para comenzar.",
-                "device_not_available": "No se encontró una cámara disponible.",
-                "device_access_denied": "Se denegó el acceso a la cámara.",
-            },
-        }
-        camera_context = webrtc_streamer(**webrtc_options)
-        camera_state = getattr(camera_context, "state", None)
-        camera_playing = bool(getattr(camera_state, "playing", False))
-        st.session_state["live_camera_playing"] = camera_playing
-        ice_state = str(getattr(camera_state, "ice_connection_state", ""))
-        if camera_playing:
-            st.session_state.pop("live_camera_start_required", None)
-            st.caption("Cámara activa · usa el botón superior para detenerla.")
-        elif camera_requested:
-            st.info("Conectando cámara… si Chrome solicita permiso, selecciona Permitir.")
-        elif st.session_state.pop("live_camera_start_required", False):
-            st.warning("Pulsa **Iniciar cámara** para mostrar el video.")
+            }
+            camera_context = webrtc_streamer(**webrtc_options)
+            camera_state = getattr(camera_context, "state", None)
+            camera_playing = bool(getattr(camera_state, "playing", False))
+            ice_state = str(getattr(camera_state, "ice_connection_state", ""))
+            st.session_state["live_camera_playing"] = camera_playing
+            if camera_playing:
+                st.session_state.pop("live_camera_start_required", None)
+                st.caption("Cámara activa · usa el botón superior para detenerla.")
+            else:
+                st.info("Conectando cámara… si Chrome solicita permiso, selecciona Permitir.")
         else:
-            st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
+            st.session_state["live_camera_playing"] = False
+            if st.session_state.pop("live_camera_start_required", False):
+                st.warning("Pulsa **Iniciar cámara** para mostrar el video.")
+            else:
+                st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
+
+        if hasattr(st, "fragment") and camera_requested:
+            @st.fragment(run_every="0.4s")
+            def live_video_fragment() -> None:
+                render_camera_preview()
+
+            live_video_fragment()
+        else:
+            render_camera_preview()
+
         camera_snapshot = state.snapshot()
         if camera_playing and camera_snapshot["camera_frames"] == 0:
             st.warning(
@@ -2398,7 +2472,6 @@ def render_live_camera(
             use_container_width=True,
             disabled=(
                 completed_count >= MAX_LIVE_SAMPLES
-                or not camera_playing
                 or not camera_requested
             ),
             help="Primero pulsa Iniciar cámara y espera a que aparezca el video.",
@@ -2417,7 +2490,7 @@ def render_live_camera(
             disabled=(
                 detection_is_active
                 or completed_count >= MAX_LIVE_SAMPLES
-                or snapshot_after_action["captured_frames"] <= 0
+                or not snapshot_after_action["sample_ready"]
             ),
         ):
             state.set_detection_active(False)
@@ -2425,7 +2498,11 @@ def render_live_camera(
             if lot_name:
                 remember_pool(lot_name)
             if state.save_current_sample(sample_code, lot_name):
+                persist_completed_live_samples(state)
+                st.session_state["live_save_feedback"] = "Muestra guardada correctamente."
                 st.rerun()
+            else:
+                st.warning("No hay una captura detenida lista para guardar.")
 
     render_live_sample_results(
         state,
@@ -2596,6 +2673,15 @@ def main() -> None:
                 border-color: #6bbfd1 !important;
                 caret-color: #ffffff !important;
             }
+            [data-testid="stTextInput"] [data-baseweb="input"],
+            [data-testid="stTextInput"] [data-baseweb="base-input"],
+            [data-testid="stTextInput"] [data-baseweb="input"] > div,
+            [data-testid="stTextInput"] [data-baseweb="base-input"] > div,
+            [data-testid="stSelectbox"] [data-baseweb="select"],
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+                background-color: #0d3153 !important;
+                border-color: #6bbfd1 !important;
+            }
             [data-testid="stTextInput"] input::placeholder {
                 color: #a6d8eb !important;
                 opacity: 1 !important;
@@ -2726,6 +2812,18 @@ def main() -> None:
                 border-radius: 7px;
                 color: #a6d8eb;
                 font-size: 0.82rem;
+                text-align: center;
+            }
+            .live-video-placeholder {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 24rem;
+                padding: 1rem;
+                background: #061a33;
+                border: 1px solid #2c8396;
+                border-radius: 12px;
+                color: #a6d8eb;
                 text-align: center;
             }
             .live-preview-footer {
