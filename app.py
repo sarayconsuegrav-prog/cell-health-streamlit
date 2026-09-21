@@ -24,7 +24,7 @@ from io import StringIO
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import cv2
 import numpy as np
@@ -156,6 +156,19 @@ def fetch_metered_ice_servers(app_name: str, api_key: str) -> list[dict[str, Any
     return [server for server in payload if isinstance(server, dict)]
 
 
+def normalize_metered_app_name(value: str) -> str:
+    """Acepta tanto el slug de Metered como su dominio completo."""
+    raw_value = value.strip()
+    parsed = urlparse(
+        raw_value if "://" in raw_value else f"https://{raw_value}"
+    )
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).strip().lower()
+    suffix = ".metered.live"
+    if host.endswith(suffix):
+        host = host[: -len(suffix)]
+    return host.strip(".")
+
+
 def rtc_configuration() -> dict[str, Any]:
     """Construye ICE servers y añade TURN solo cuando el despliegue lo configura."""
     ice_servers = [dict(server) for server in DEFAULT_ICE_SERVERS]
@@ -171,10 +184,23 @@ def rtc_configuration() -> dict[str, Any]:
             st.warning("RTC_ICE_SERVERS_JSON no tiene un formato JSON válido; se usará STUN.")
         return {"iceServers": ice_servers}
 
-    metered_app_name = runtime_setting("METERED_APP_NAME")
+    metered_app_name = normalize_metered_app_name(runtime_setting("METERED_APP_NAME"))
     metered_api_key = runtime_setting("METERED_API_KEY")
     if metered_app_name and metered_api_key:
-        ice_servers.extend(fetch_metered_ice_servers(metered_app_name, metered_api_key))
+        if metered_api_key.startswith("pk_live_"):
+            st.warning(
+                "La clave de Metered parece ser una clave Publishable de Realtime. "
+                "Usa la API key de TURN REST en METERED_API_KEY."
+            )
+        else:
+            metered_servers = fetch_metered_ice_servers(metered_app_name, metered_api_key)
+            if metered_servers:
+                ice_servers.extend(metered_servers)
+            else:
+                st.warning(
+                    "Metered no devolvió servidores TURN. Verifica METERED_APP_NAME "
+                    "y que METERED_API_KEY sea la API key de TURN REST."
+                )
 
     turn_urls = [
         url.strip()
