@@ -2225,6 +2225,13 @@ def render_live_camera(
             st.warning("Primero pulsa **INICIAR CÁMARA** dentro del recuadro de video.")
         else:
             st.caption("Pulsa **INICIAR CÁMARA** dentro del recuadro para mostrar el video.")
+        camera_snapshot = state.snapshot()
+        if camera_playing and camera_snapshot["camera_frames"] == 0:
+            st.warning(
+                "La cámara está encendida, pero todavía no llegan fotogramas. "
+                "Si permanece en blanco durante varios segundos, permite la cámara "
+                "en Chrome y configura TURN en Manage app → Settings → Secrets."
+            )
         if ice_state.lower() in {"failed", "disconnected", "closed"}:
             st.warning(
                 "El navegador no pudo conectar el video. Revisa el permiso de cámara o "
