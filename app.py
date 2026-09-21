@@ -1844,8 +1844,6 @@ def render_live_camera(
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
-    if "live_camera_playing" not in st.session_state:
-        st.session_state["live_camera_playing"] = False
     if "live_detection_requested" not in st.session_state:
         st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
     if st.session_state["live_detection_requested"] and not state.snapshot()["detection_active"]:
@@ -1854,7 +1852,7 @@ def render_live_camera(
         # primer fotograma vea la detección como detenida.
         state.set_detection_active(True)
 
-    camera_is_playing = bool(st.session_state.get("live_camera_playing", False))
+    camera_is_requested = bool(st.session_state.get("live_camera_requested", False))
     completed_count = len(state.completed_samples_snapshot())
     saved_pools = get_saved_pools()
     if "live_pool_selector_pending" in st.session_state:
@@ -1912,7 +1910,7 @@ def render_live_camera(
         list(LIVE_RESOLUTIONS),
         index=0,
         key="live_resolution_label",
-        disabled=camera_is_playing,
+        disabled=camera_is_requested,
         help=(
             "La cámara ofrece hasta 2 MP en video. La opción Full HD solicita 1920 × 1080; "
             "el navegador puede usar la resolución compatible más cercana."
@@ -1941,7 +1939,19 @@ def render_live_camera(
         st.session_state.get("live_detection_requested", False)
     )
     with camera_action:
-        st.caption("La cámara se inicia en el recuadro de video")
+        camera_label = "Detener cámara" if camera_is_requested else "Iniciar cámara"
+        if st.button(
+            camera_label,
+            type="primary",
+            key="live_camera_action",
+            use_container_width=True,
+        ):
+            next_camera_state = not camera_is_requested
+            st.session_state["live_camera_requested"] = next_camera_state
+            if not next_camera_state:
+                state.set_detection_active(False)
+                st.session_state["live_detection_requested"] = False
+            st.rerun()
 
     def toggle_live_detection() -> None:
         """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
@@ -1960,7 +1970,7 @@ def render_live_camera(
                 reset_trackers(active_model)
         if lot_name:
             remember_pool(lot_name)
-        if not st.session_state.get("live_camera_playing", False):
+        if not camera_is_requested:
             st.session_state["live_detection_requested"] = False
             st.session_state["live_camera_start_required"] = True
             return
@@ -2198,19 +2208,26 @@ def render_live_camera(
                 "device_not_available": "No se encontró una cámara disponible.",
                 "device_access_denied": "Se denegó el acceso a la cámara.",
             },
+            # El botón externo es el único control de cámara visible. Esta
+            # opción hace que streamlit-webrtc oculte sus controles internos y
+            # siga el estado del botón "Iniciar cámara" / "Detener cámara".
+            "desired_playing_state": camera_is_requested,
         }
         camera_context = webrtc_streamer(**webrtc_options)
         camera_state = getattr(camera_context, "state", None)
         camera_playing = bool(getattr(camera_state, "playing", False))
         ice_state = str(getattr(camera_state, "ice_connection_state", ""))
-        st.session_state["live_camera_playing"] = camera_playing
         if camera_playing:
             st.session_state.pop("live_camera_start_required", None)
             st.success("Cámara activa")
+        elif camera_is_requested:
+            st.info(
+                "Iniciando cámara… si Chrome solicita permiso, selecciona **Permitir**."
+            )
         elif st.session_state.pop("live_camera_start_required", False):
-            st.warning("Primero pulsa **INICIAR CÁMARA** dentro del recuadro de video.")
+            st.warning("Primero pulsa **Iniciar cámara** para activar el video.")
         else:
-            st.info("Pulsa **INICIAR CÁMARA** dentro del recuadro y permite el acceso a la cámara.")
+            st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
         if ice_state.lower() in {"failed", "disconnected", "closed"}:
             st.warning(
                 "El navegador no pudo conectar el video. Revisa el permiso de cámara o "
@@ -2229,7 +2246,7 @@ def render_live_camera(
     render_live_sample_results(
         state,
         lot_name,
-        camera_is_playing,
+        camera_is_requested or camera_playing,
         10.0,
         30.0,
         60.0,
