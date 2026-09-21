@@ -2056,7 +2056,6 @@ def render_live_camera(
             pool_options,
             key="live_pool_selector",
             disabled=completed_count > 0,
-            help="Selecciona una piscina ya registrada o agrega una nueva a la lista.",
         )
         if selected_pool == NEW_POOL_OPTION:
             new_pool_name = st.text_input(
@@ -2089,7 +2088,6 @@ def render_live_camera(
         sample_code = st.text_input(
             f"Código del camarón · muestra {current_sample_number} de {MAX_LIVE_SAMPLES}",
             key=sample_code_key,
-            help="Cada muestra debe tener un código para identificarla en el reporte.",
         ).strip()
     resolution_label = st.selectbox(
         "Resolución de captura de video",
@@ -2097,10 +2095,6 @@ def render_live_camera(
         index=0,
         key="live_resolution_label",
         disabled=camera_is_playing or camera_requested,
-        help=(
-            "La cámara ofrece hasta 2 MP en video. La opción Full HD solicita 1920 × 1080; "
-            "el navegador puede usar la resolución compatible más cercana."
-        ),
     )
     resolution = LIVE_RESOLUTIONS[resolution_label]
 
@@ -2357,11 +2351,6 @@ def render_live_camera(
             key="live_camera_toggle",
             use_container_width=True,
             on_click=toggle_live_camera,
-            help=(
-                "Detiene la cámara y conserva la muestra para guardarla."
-                if camera_requested
-                else "Solicita permiso y muestra la cámara en el recuadro."
-            ),
         )
 
     camera_column, status_column = st.columns([1.55, 1.45], gap="large")
@@ -2476,7 +2465,6 @@ def render_live_camera(
                 completed_count >= MAX_LIVE_SAMPLES
                 or not camera_requested
             ),
-            help="Primero pulsa Iniciar cámara y espera a que aparezca el video.",
             on_click=toggle_live_detection,
         )
     if state.snapshot()["detection_active"] or st.session_state.get(
