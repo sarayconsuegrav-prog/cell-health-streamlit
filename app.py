@@ -495,7 +495,7 @@ def draw_live_status_overlay(
     height, width = output.shape[:2]
     if not detection_active:
         return output
-    label = "REC / EN VIVO"
+    label = "EN VIVO"
     badge_color = (40, 40, 220)  # rojo en BGR
 
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -667,6 +667,7 @@ class LiveSessionState:
     inference_model: YOLO | None = None
     inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
+    sample_ready: bool = False
 
     def _close_recording_locked(self, delete_file: bool = False) -> None:
         """Cierra el archivo temporal actual sin borrar un video ya detenido."""
@@ -734,6 +735,7 @@ class LiveSessionState:
             self.inference_busy = False
             self.last_error = ""
             self.inference_retry_at = 0.0
+            self.sample_ready = False
 
     def set_detection_active(self, active: bool) -> None:
         with self.lock:
@@ -741,6 +743,7 @@ class LiveSessionState:
             if not active:
                 self.inference_busy = False
                 self._close_recording_locked()
+                self.sample_ready = self.captured_frames > 0
 
     def clear_completed_samples(self) -> None:
         with self.lock:
@@ -784,6 +787,21 @@ class LiveSessionState:
             # siguiente análisis solo podrá borrar su propio archivo temporal.
             self.recording_path = None
             self.recording_size = None
+            self.frame_number = 0
+            self.captured_frames = 0
+            self.processed_frames = 0
+            self.recorded_frames = 0
+            self.track_votes = defaultdict(Counter)
+            self.measurement_samples = new_measurement_samples()
+            self.calibration = None
+            self.cached_shape = None
+            self.cached_healthy_masks = None
+            self.cached_sick_masks = None
+            self.inference_generation += 1
+            self.inference_busy = False
+            self.last_error = ""
+            self.inference_retry_at = 0.0
+            self.sample_ready = False
             return True
 
     def completed_samples_snapshot(self) -> list[dict[str, Any]]:
@@ -830,6 +848,7 @@ class LiveSessionState:
                 "processed_frames": self.processed_frames,
                 "recorded_frames": self.recorded_frames,
                 "recording_ready": bool(self.recording_path),
+                "sample_ready": self.sample_ready,
                 "inference_busy": self.inference_busy,
                 "model_loading": self.model_loading,
                 "last_error": self.last_error,
@@ -1727,9 +1746,12 @@ def render_live_metrics_panel(
         counts = snapshot["counts"]
         sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
         current_card = ""
-        if detection_requested or snapshot["detection_active"] or (
-            snapshot["captured_frames"] > 0 and len(completed_samples) < MAX_LIVE_SAMPLES
-        ):
+        if (
+            detection_requested
+            or snapshot["detection_active"]
+            or snapshot["sample_ready"]
+            or snapshot["captured_frames"] > 0
+        ) and len(completed_samples) < MAX_LIVE_SAMPLES:
             current_card = metric_card(
                 f"Camarón muestra {sample_number}",
                 current_sample_code or "Código pendiente",
@@ -1778,7 +1800,12 @@ def render_live_metrics_panel(
                 unsafe_allow_html=True,
             )
 
-        if snapshot["captured_frames"] > 0 or snapshot["detection_active"] or detection_requested:
+        if (
+            snapshot["captured_frames"] > 0
+            or snapshot["sample_ready"]
+            or snapshot["detection_active"]
+            or detection_requested
+        ):
             status = (
                 "Grabando muestra"
                 if snapshot["detection_active"] or detection_requested
@@ -1795,7 +1822,7 @@ def render_live_metrics_panel(
         if detection_requested and snapshot["camera_frames"] == 0:
             st.warning(
                 "La cámara todavía no entrega fotogramas. Autoriza el acceso en el navegador "
-                "y pulsa INICIAR CÁMARA dentro del recuadro de video."
+                "y pulsa Iniciar cámara fuera del recuadro de video."
             )
 
         if snapshot["model_loading"]:
@@ -1946,6 +1973,8 @@ def render_live_camera(
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
     if "live_camera_playing" not in st.session_state:
         st.session_state["live_camera_playing"] = False
+    if "live_camera_requested" not in st.session_state:
+        st.session_state["live_camera_requested"] = False
     if "live_detection_requested" not in st.session_state:
         st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
     if st.session_state["live_detection_requested"] and not state.snapshot()["detection_active"]:
@@ -1955,6 +1984,7 @@ def render_live_camera(
         state.set_detection_active(True)
 
     camera_is_playing = bool(st.session_state.get("live_camera_playing", False))
+    camera_requested = bool(st.session_state.get("live_camera_requested", False))
     completed_count = len(state.completed_samples_snapshot())
     saved_pools = get_saved_pools()
     if "live_pool_selector_pending" in st.session_state:
@@ -2012,7 +2042,7 @@ def render_live_camera(
         list(LIVE_RESOLUTIONS),
         index=0,
         key="live_resolution_label",
-        disabled=camera_is_playing,
+        disabled=camera_is_playing or camera_requested,
         help=(
             "La cámara ofrece hasta 2 MP en video. La opción Full HD solicita 1920 × 1080; "
             "el navegador puede usar la resolución compatible más cercana."
@@ -2034,13 +2064,30 @@ def render_live_camera(
         state.show_healthy_masks = show_healthy_masks
         state.show_sick_masks = show_sick_masks
 
-    # El navegador debe iniciar la cámara desde el control nativo de WebRTC:
-    # ese clic es el gesto de usuario que permite solicitar el permiso de cámara.
-    # Se reservan estos espacios para conservar los botones por encima del video
-    # aunque el componente se renderice más abajo y nos entregue su estado real.
-    detection_action, save_action = st.columns([1.25, 1.15], gap="small")
+    # Los tres controles viven fuera del video. `desired_playing_state` le indica
+    # a streamlit-webrtc cuándo iniciar/detener la cámara y oculta sus controles
+    # nativos dentro del recuadro.
+    camera_action, detection_action, save_action = st.columns(
+        [1.05, 1.25, 1.15], gap="small"
+    )
+    camera_action_slot = camera_action.empty()
     detection_action_slot = detection_action.empty()
     save_action_slot = save_action.empty()
+
+    def toggle_live_camera() -> None:
+        """Solicita iniciar o detener la cámara desde el botón exterior."""
+        requested = bool(st.session_state.get("live_camera_requested", False))
+        if requested:
+            # Si se detiene la cámara durante una muestra, la muestra queda
+            # cerrada pero sus métricas siguen disponibles para guardarlas.
+            if state.snapshot()["detection_active"]:
+                state.set_detection_active(False)
+                st.session_state["live_detection_requested"] = False
+            st.session_state["live_camera_requested"] = False
+            st.session_state["live_camera_playing"] = False
+            return
+        st.session_state["live_camera_requested"] = True
+        st.session_state.pop("live_camera_start_required", None)
 
     def toggle_live_detection() -> None:
         """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
@@ -2231,11 +2278,26 @@ def render_live_camera(
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
             return frame
 
+    with camera_action_slot:
+        st.button(
+            "Detener cámara" if camera_requested else "Iniciar cámara",
+            type="secondary" if camera_requested else "primary",
+            key="live_camera_toggle",
+            use_container_width=True,
+            on_click=toggle_live_camera,
+            help=(
+                "Detiene la cámara y conserva la muestra para guardarla."
+                if camera_requested
+                else "Solicita permiso y muestra la cámara en el recuadro."
+            ),
+        )
+
     camera_column, status_column = st.columns([1.55, 1.45], gap="large")
     with camera_column:
         webrtc_options: dict[str, Any] = {
             "key": "cell_live_camera",
             "mode": WebRtcMode.SENDRECV,
+            "desired_playing_state": camera_requested,
             "rtc_configuration": rtc_configuration(),
             "media_stream_constraints": {
                 "video": {
@@ -2272,17 +2334,19 @@ def render_live_camera(
         ice_state = str(getattr(camera_state, "ice_connection_state", ""))
         if camera_playing:
             st.session_state.pop("live_camera_start_required", None)
-            st.success("Cámara activa")
+            st.caption("Cámara activa · usa el botón superior para detenerla.")
+        elif camera_requested:
+            st.info("Conectando cámara… si Chrome solicita permiso, selecciona Permitir.")
         elif st.session_state.pop("live_camera_start_required", False):
-            st.warning("Primero pulsa **INICIAR CÁMARA** dentro del recuadro de video.")
+            st.warning("Pulsa **Iniciar cámara** para mostrar el video.")
         else:
-            st.caption("Pulsa **INICIAR CÁMARA** dentro del recuadro para mostrar el video.")
+            st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
         camera_snapshot = state.snapshot()
         if camera_playing and camera_snapshot["camera_frames"] == 0:
             st.warning(
                 "La cámara está encendida, pero todavía no llegan fotogramas. "
                 "Si permanece en blanco durante varios segundos, permite la cámara "
-                "en Chrome y configura TURN en Manage app → Settings → Secrets."
+                "en Chrome y verifica TURN en Manage app → Settings → Secrets."
             )
         if ice_state.lower() in {"failed", "disconnected", "closed"}:
             st.warning(
@@ -2312,8 +2376,9 @@ def render_live_camera(
             disabled=(
                 completed_count >= MAX_LIVE_SAMPLES
                 or not camera_playing
+                or not camera_requested
             ),
-            help="Primero pulsa INICIAR CÁMARA dentro del video para habilitar la detección.",
+            help="Primero pulsa Iniciar cámara y espera a que aparezca el video.",
             on_click=toggle_live_detection,
         )
     if state.snapshot()["detection_active"] or st.session_state.get(
