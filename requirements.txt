@@ -1,10 +1,20 @@
-streamlit>=1.51,<2
-ultralytics>=8.3
-lap>=0.5.12
-openvino>=2025.2,<2026
-opencv-python-headless>=4.10
-numpy>=1.26
+# Python 3.10+ is required by the current Streamlit/WebRTC stack.
+# Keep the UI and camera component reproducible; both affect reruns and media
+# transport directly.
+streamlit==1.64.0
+streamlit-webrtc==0.78.1
+
+# Keep the model/runtime pair reproducible while moving to the OpenVINO line
+# that supports the Python 3.14 deployment and current NumPy wheels.
+ultralytics==8.4.158
+lap==0.5.13
+openvino==2026.4.0
+
+# Avoid silently moving to OpenCV 5 or NumPy 3 in the live application.
+opencv-python-headless>=4.10,<5
+opencv-python>=4.10,<5
+numpy>=2.3,<2.6; python_version >= "3.11"
+numpy>=1.26,<2.3; python_version < "3.11"
 tornado>=6.3,<7
 av>=15.1.0,<18
 aiortc>=1.14.0,<2
-streamlit-webrtc==0.72.2

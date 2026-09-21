@@ -63,6 +63,12 @@ cp "/ruta/al/nuevo/modelo.pt" models/best.pt
 
 ## Instalación y ejecución
 
+La versión publicada usa Python 3.14. `requirements.txt` fija las versiones
+del componente WebRTC, del modelo y de OpenVINO para evitar que una nueva
+instalación cambie silenciosamente el comportamiento de la cámara o del
+conteo. Si se cambia alguna de esas versiones, valida primero cámara, inicio y
+detención de detección, métricas y guardado de muestras.
+
 Desde esta carpeta:
 
 ```bash
