@@ -113,9 +113,59 @@ COLORS_BGR = {
     "otra": (220, 165, 30),      # Azul
 }
 LIVE_INFERENCE_LOCK = Lock()
-RTC_CONFIGURATION = {
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
-}
+DEFAULT_ICE_SERVERS = [
+    {"urls": [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun2.l.google.com:19302",
+    ]},
+    {"urls": ["stun:stun.relay.metered.ca:80"]},
+]
+
+
+def runtime_setting(name: str) -> str:
+    """Lee una configuración opcional desde Secrets de Streamlit o variables de entorno."""
+    environment_value = os.getenv(name, "").strip()
+    try:
+        secret_value = st.secrets.get(name)
+    except Exception:
+        secret_value = None
+    if secret_value is None:
+        return environment_value
+    return str(secret_value).strip() or environment_value
+
+
+def rtc_configuration() -> dict[str, Any]:
+    """Construye ICE servers y añade TURN solo cuando el despliegue lo configura."""
+    ice_servers = [dict(server) for server in DEFAULT_ICE_SERVERS]
+    raw_ice_servers = runtime_setting("RTC_ICE_SERVERS_JSON")
+    if raw_ice_servers:
+        try:
+            parsed = json.loads(raw_ice_servers)
+            if isinstance(parsed, dict):
+                parsed = parsed.get("iceServers", [])
+            if isinstance(parsed, list):
+                ice_servers.extend(server for server in parsed if isinstance(server, dict))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            st.warning("RTC_ICE_SERVERS_JSON no tiene un formato JSON válido; se usará STUN.")
+        return {"iceServers": ice_servers}
+
+    turn_urls = [
+        url.strip()
+        for url in runtime_setting("RTC_TURN_URLS").split(",")
+        if url.strip()
+    ]
+    turn_username = runtime_setting("RTC_TURN_USERNAME")
+    turn_credential = runtime_setting("RTC_TURN_CREDENTIAL")
+    if turn_urls and turn_username and turn_credential:
+        ice_servers.append(
+            {
+                "urls": turn_urls,
+                "username": turn_username,
+                "credential": turn_credential,
+            }
+        )
+    return {"iceServers": ice_servers}
 
 
 def is_openvino_model_dir(path: Path) -> bool:
@@ -2134,7 +2184,7 @@ def render_live_camera(
         webrtc_options: dict[str, Any] = {
             "key": "cell_live_camera",
             "mode": WebRtcMode.SENDRECV,
-            "rtc_configuration": RTC_CONFIGURATION,
+            "rtc_configuration": rtc_configuration(),
             "media_stream_constraints": {
                 "video": {
                     "width": {"ideal": resolution["width"]},

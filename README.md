@@ -12,6 +12,18 @@ El tamaño de inferencia inicial es 1280 px, igual que el usado al entrenar el m
 
 También hace seguimiento de objetos para que el número final sea de células únicas, en vez de sumar la misma célula en cada fotograma. La clase final de una célula es la más frecuente durante su seguimiento.
 
+### Cámara en Streamlit Cloud
+
+La cámara en vivo usa WebRTC. La aplicación incluye servidores STUN públicos y acepta un servidor TURN opcional mediante Secrets de Streamlit. Si el navegador muestra **“Connection is taking longer than expected”** y el video queda en blanco, crea credenciales TURN en un proveedor como Metered o Twilio y agrega estos Secrets en **Manage app → Settings → Secrets**:
+
+```toml
+RTC_TURN_URLS = "turn:servidor:80,turn:servidor:443,turns:servidor:443?transport=tcp"
+RTC_TURN_USERNAME = "tu_usuario_turn"
+RTC_TURN_CREDENTIAL = "tu_credencial_turn"
+```
+
+No publiques esas credenciales en GitHub. La cámara se inicia con **INICIAR CÁMARA** dentro del recuadro; después se habilita **Iniciar detección**.
+
 ## Modelo
 
 El modelo revisado es de segmentación y declara estas clases:
