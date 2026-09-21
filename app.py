@@ -69,6 +69,7 @@ LIVE_INFERENCE_EVERY_N_FRAMES = 3
 VIDEO_INFERENCE_STRIDE = 2
 VIDEO_OUTPUT_MAX_WIDTH = 1280
 LIVE_INFERENCE_RETRY_SECONDS = 2.0
+LIVE_RECORD_EVERY_N_FRAMES = 2
 # Las mediciones se usan para promedios; conservar cada observación de cada
 # fotograma puede hacer crecer la RAM sin mejorar de forma apreciable el reporte.
 MAX_MEASUREMENT_OBSERVATIONS = 2000
@@ -77,7 +78,7 @@ LIVE_RESOLUTIONS = {
         "width": 640,
         "height": 480,
         "frame_rate": 24,
-        "inference_size": 640,
+        "inference_size": 512,
         "inference_every": 3,
     },
     "1280 × 720 (HD)": {
@@ -1844,7 +1845,7 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
     resolution_label = st.selectbox(
         "Resolución de captura de video",
         list(LIVE_RESOLUTIONS),
-        index=1,
+        index=0,
         key="live_resolution_label",
         disabled=camera_is_requested,
         help=(
@@ -2059,7 +2060,11 @@ def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: floa
                 output,
                 True,
             )
-            state.record_frame(output, resolution["frame_rate"])
+            if frame_number % LIVE_RECORD_EVERY_N_FRAMES == 1:
+                state.record_frame(
+                    output,
+                    resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
+                )
             return av.VideoFrame.from_ndarray(output, format="bgr24")
         except Exception as error:
             with state.lock:
