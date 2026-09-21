@@ -544,6 +544,7 @@ class LiveSessionState:
     show_healthy_masks: bool = True
     show_sick_masks: bool = True
     frame_number: int = 0
+    camera_frames: int = 0
     captured_frames: int = 0
     processed_frames: int = 0
     recording_writer: Any | None = None
@@ -617,6 +618,7 @@ class LiveSessionState:
         with self.lock:
             self._close_recording_locked(delete_file=True)
             self.frame_number = 0
+            self.camera_frames = 0
             self.captured_frames = 0
             self.processed_frames = 0
             self.recorded_frames = 0
@@ -721,6 +723,7 @@ class LiveSessionState:
                 "detection_active": self.detection_active,
                 "counts": counts,
                 "measurements": measurements,
+                "camera_frames": self.camera_frames,
                 "captured_frames": self.captured_frames,
                 "processed_frames": self.processed_frames,
                 "recorded_frames": self.recorded_frames,
@@ -1684,6 +1687,15 @@ def render_live_metrics_panel(
                 f"{snapshot['processed_frames']:,} inferidos"
             )
 
+        if not snapshot["detection_active"] and snapshot["camera_frames"] > 0:
+            st.caption(f"Cámara activa · {snapshot['camera_frames']:,} fotogramas recibidos")
+
+        if detection_requested and snapshot["camera_frames"] == 0:
+            st.warning(
+                "La cámara todavía no entrega fotogramas. Autoriza el acceso y pulsa "
+                "INICIAR CÁMARA dentro del recuadro si aparece ese control."
+            )
+
         if snapshot["model_loading"]:
             st.caption("Preparando el modelo… el video continúa grabándose.")
 
@@ -1832,6 +1844,10 @@ def render_live_camera(
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
     if "live_camera_requested" not in st.session_state:
         st.session_state["live_camera_requested"] = False
+    if "live_camera_auto_start" not in st.session_state:
+        st.session_state["live_camera_auto_start"] = False
+    if "live_camera_manual_mode" not in st.session_state:
+        st.session_state["live_camera_manual_mode"] = False
     if "live_detection_requested" not in st.session_state:
         st.session_state["live_detection_requested"] = state.snapshot()["detection_active"]
     if st.session_state["live_detection_requested"] and not state.snapshot()["detection_active"]:
@@ -1931,6 +1947,8 @@ def render_live_camera(
         if st.button(action_label, type="primary", key="live_camera_action", use_container_width=True):
             next_camera_state = not camera_is_requested
             st.session_state["live_camera_requested"] = next_camera_state
+            st.session_state["live_camera_auto_start"] = next_camera_state
+            st.session_state["live_camera_manual_mode"] = False
             if not next_camera_state:
                 state.set_detection_active(False)
                 st.session_state["live_detection_requested"] = False
@@ -1956,6 +1974,8 @@ def render_live_camera(
         # El botón de detección también puede iniciar la cámara; así no queda
         # bloqueado si el usuario todavía no pulsó "Iniciar cámara".
         st.session_state["live_camera_requested"] = True
+        st.session_state["live_camera_auto_start"] = True
+        st.session_state["live_camera_manual_mode"] = False
         st.session_state["live_detection_requested"] = True
         state.set_detection_active(True)
 
@@ -2085,6 +2105,7 @@ def render_live_camera(
             image = frame.to_ndarray(format="bgr24")
             with state.lock:
                 state.frame_number += 1
+                state.camera_frames += 1
                 frame_number = state.frame_number
                 detection_active = state.detection_active
                 cached_shape = state.cached_shape
@@ -2159,11 +2180,13 @@ def render_live_camera(
     if st.session_state["live_camera_requested"]:
         camera_column, status_column = st.columns([1.55, 1.45], gap="large")
         with camera_column:
-            webrtc_streamer(
-                key=f"cell_live_camera_{resolution['width']}x{resolution['height']}",
-                mode=WebRtcMode.SENDRECV,
-                rtc_configuration=RTC_CONFIGURATION,
-                media_stream_constraints={
+            auto_start_camera = bool(st.session_state.get("live_camera_auto_start", False))
+            manual_camera_mode = bool(st.session_state.get("live_camera_manual_mode", False))
+            webrtc_options: dict[str, Any] = {
+                "key": "cell_live_camera",
+                "mode": WebRtcMode.SENDRECV,
+                "rtc_configuration": RTC_CONFIGURATION,
+                "media_stream_constraints": {
                     "video": {
                         "width": {"ideal": resolution["width"], "max": resolution["width"]},
                         "height": {"ideal": resolution["height"], "max": resolution["height"]},
@@ -2174,9 +2197,10 @@ def render_live_camera(
                     },
                     "audio": False,
                 },
-                video_frame_callback=process_live_frame,
-                desired_playing_state=True,
-                video_html_attrs={
+                "video_frame_callback": process_live_frame,
+                "async_processing": True,
+                "media_toggle_controls": True,
+                "video_html_attrs": {
                     "autoPlay": True,
                     "controls": False,
                     "muted": True,
@@ -2185,7 +2209,7 @@ def render_live_camera(
                     "height": resolution["height"],
                     "style": {"width": "100%", "height": "auto", "borderRadius": "12px"},
                 },
-                translations={
+                "translations": {
                     "start": "INICIAR CÁMARA",
                     "stop": "DETENER CÁMARA",
                     "select_device": "ELEGIR CÁMARA",
@@ -2193,7 +2217,34 @@ def render_live_camera(
                     "device_not_available": "No se encontró una cámara disponible.",
                     "device_access_denied": "Se denegó el acceso a la cámara.",
                 },
-            )
+            }
+            # El arranque automático se intenta una vez. Si el navegador no lo
+            # permite, se vuelve al control nativo del componente para que el
+            # usuario pueda autorizar o elegir otra cámara.
+            if auto_start_camera and not manual_camera_mode:
+                webrtc_options["desired_playing_state"] = True
+            camera_context = webrtc_streamer(**webrtc_options)
+            camera_state = getattr(camera_context, "state", None)
+            camera_playing = bool(getattr(camera_state, "playing", False))
+            camera_signalling = bool(getattr(camera_state, "signalling", False))
+            ice_state = str(getattr(camera_state, "ice_connection_state", ""))
+            if camera_playing:
+                st.session_state["live_camera_auto_start"] = False
+                st.session_state["live_camera_manual_mode"] = False
+            elif auto_start_camera and not manual_camera_mode and not camera_signalling:
+                st.session_state["live_camera_auto_start"] = False
+                st.session_state["live_camera_manual_mode"] = True
+                st.rerun()
+            elif manual_camera_mode:
+                st.info(
+                    "Pulsa **INICIAR CÁMARA** dentro del recuadro y permite el acceso "
+                    "a la cámara del navegador."
+                )
+            if ice_state.lower() in {"failed", "disconnected", "closed"}:
+                st.warning(
+                    "No se pudo conectar el video en vivo. Prueba otra red o navegador; "
+                    "esta conexión puede requerir un servidor TURN."
+                )
         with status_column:
             render_live_metrics_panel(
                 state,
