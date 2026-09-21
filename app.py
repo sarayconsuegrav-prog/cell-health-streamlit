@@ -7,7 +7,6 @@ segmentación, sin cajas delimitadoras ni etiquetas.
 from __future__ import annotations
 
 import csv
-import base64
 from copy import deepcopy
 import gc
 import hashlib
@@ -2356,52 +2355,15 @@ def render_live_camera(
 
     camera_column, status_column = st.columns([1.55, 1.45], gap="large")
     with camera_column:
-        def render_camera_preview() -> None:
-            preview_frame = state.latest_frame_snapshot()
-            if preview_frame is None:
-                st.markdown(
-                    '<div class="live-video-placeholder">'
-                    "Esperando la señal de la cámara…"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                # Streamlit espera RGB para la imagen renderizada. El callback
-                # trabaja en BGR porque OpenCV/aiortc lo usa internamente.
-                preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
-                # En algunos navegadores Streamlit no logra servir de forma
-                # estable un ndarray actualizado dentro de un fragmento. En
-                # ese caso el elemento queda como imagen rota aunque el
-                # contador confirme que WebRTC sí recibe fotogramas. Entregar
-                # JPEG bytes mantiene la vista previa ligera y evita esa
-                # serialización fallida.
-                encoded, preview_jpeg = cv2.imencode(
-                    ".jpg",
-                    preview_rgb,
-                    [cv2.IMWRITE_JPEG_QUALITY, 82],
-                )
-                if encoded:
-                    preview_base64 = base64.b64encode(preview_jpeg.tobytes()).decode(
-                        "ascii"
-                    )
-                    st.markdown(
-                        '<img class="live-stream-image" '
-                        f'src="data:image/jpeg;base64,{preview_base64}" '
-                        'alt="Vista previa de la cámara" />',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.error("No se pudo preparar el fotograma de la cámara.")
-
-        # SENDONLY evita que streamlit-webrtc pinte su Placeholder blanco y
-        # sus controles internos. El cuadro procesado se muestra con Streamlit
-        # a partir del último frame recibido por el callback.
+        # WebRTC se encarga de transportar y pintar el video a la frecuencia
+        # de la cámara. Streamlit no debe reconstruir una imagen JPEG en cada
+        # rerun: hacerlo por el WebSocket de la interfaz causa saltos visibles.
         camera_playing = False
         ice_state = ""
         if camera_requested:
             webrtc_options: dict[str, Any] = {
                 "key": "cell_live_camera",
-                "mode": WebRtcMode.SENDONLY,
+                "mode": WebRtcMode.SENDRECV,
                 "desired_playing_state": True,
                 "rtc_configuration": rtc_configuration(),
                 "media_stream_constraints": {
@@ -2414,7 +2376,7 @@ def render_live_camera(
                 },
                 "video_frame_callback": process_live_frame,
                 "async_processing": False,
-                "sendback_video": False,
+                "sendback_video": True,
                 "sendback_audio": False,
                 "translations": {
                     "device_ask_permission": "Autoriza el acceso a la cámara para comenzar.",
@@ -2438,15 +2400,6 @@ def render_live_camera(
                 st.warning("Pulsa **Iniciar cámara** para mostrar el video.")
             else:
                 st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
-
-        if hasattr(st, "fragment") and camera_requested:
-            @st.fragment(run_every="0.4s")
-            def live_video_fragment() -> None:
-                render_camera_preview()
-
-            live_video_fragment()
-        else:
-            render_camera_preview()
 
         camera_snapshot = state.snapshot()
         if camera_playing and camera_snapshot["camera_frames"] == 0:
@@ -2774,32 +2727,22 @@ def main() -> None:
                 color: #ffffff !important;
             }
             [data-testid="stPills"] button * { color: inherit !important; }
-            /* El componente ajusta su propio alto cuando recibe el primer
-               fotograma. No fijar el alto del iframe: hacerlo deja un aviso
-               blanco separado del video durante la negociación WebRTC. */
-            /* WebRTC se usa como transporte de captura; el video visible lo
-               dibuja el panel Streamlit de abajo. Mantener el iframe montado
-               pero fuera de la vista evita la franja blanca del Placeholder
-               interno sin detener la cámara ni sus callbacks. */
+            /* El video debe permanecer en WebRTC: así conserva la frecuencia
+               de la cámara y no depende de reruns del WebSocket de Streamlit. */
             [data-testid="stCustomComponentV1"] {
-                position: relative !important;
-                width: 1px !important;
-                height: 1px !important;
-                min-height: 1px !important;
-                max-height: 1px !important;
-                overflow: hidden !important;
+                width: 100% !important;
+                min-height: 24rem !important;
+                height: auto !important;
+                overflow: visible !important;
                 margin: 0 !important;
                 padding: 0 !important;
             }
             [data-testid="stCustomComponentV1"] iframe {
-                position: absolute !important;
-                left: -10000px !important;
-                top: 0 !important;
-                width: 1px !important;
-                height: 1px !important;
-                min-height: 1px !important;
-                max-height: 1px !important;
-                visibility: hidden !important;
+                display: block !important;
+                position: relative !important;
+                width: 100% !important;
+                min-height: 24rem !important;
+                height: 30rem !important;
                 border: 0 !important;
             }
             .live-preview {
@@ -2855,16 +2798,6 @@ def main() -> None:
                 border-radius: 12px;
                 color: #a6d8eb;
                 text-align: center;
-            }
-            .live-stream-image {
-                display: block;
-                width: 100%;
-                height: auto;
-                min-height: 12rem;
-                object-fit: contain;
-                background: #061a33;
-                border: 1px solid #2c8396;
-                border-radius: 12px;
             }
             .live-preview-footer {
                 margin-top: 0.35rem;
