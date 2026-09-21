@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -246,7 +246,7 @@ def load_model(model_path: str | Path) -> YOLO:
     return YOLO(str(path))
 
 
-def get_model_names(model: YOLO) -> dict[int, str]:
+def get_model_names(model: YOLO | None) -> dict[int, str]:
     """Obtiene las clases tanto de YOLO/PyTorch como de ciertos backends OpenVINO.
 
     Algunas versiones de Ultralytics cargan el modelo OpenVINO sin publicar
@@ -254,6 +254,9 @@ def get_model_names(model: YOLO) -> dict[int, str]:
     declaradas en el modelo convertido para que la cámara y los videos sigan
     clasificando las máscaras correctamente.
     """
+    if model is None:
+        return DEFAULT_MODEL_NAMES.copy()
+
     candidates: list[Any] = []
     try:
         candidates.append(model.names)
@@ -266,7 +269,7 @@ def get_model_names(model: YOLO) -> dict[int, str]:
 
     try:
         backend_model = model.model
-    except AttributeError:
+    except Exception:
         backend_model = None
     if backend_model is not None:
         try:
@@ -1336,13 +1339,14 @@ def process_video(
 
 
 def render_photo_mode(
-    model: YOLO,
+    model: YOLO | None,
     confidence: float,
     image_size: int,
     mask_opacity: float,
     low_limit: float,
     medium_limit: float,
     high_limit: float,
+    model_loader: Callable[[], YOLO] | None = None,
 ) -> None:
     """Renderiza el flujo rápido de una sola fotografía."""
     st.markdown(
@@ -1404,8 +1408,13 @@ def render_photo_mode(
     else:
         with st.spinner("Analizando la foto…"):
             try:
+                analysis_model = model
+                if analysis_model is None:
+                    if model_loader is None:
+                        raise RuntimeError("El modelo de inferencia aún no está disponible.")
+                    analysis_model = model_loader()
                 original_image, healthy_masks, sick_masks, counts, measurements = process_image(
-                    model, image_bytes, confidence, image_size, mask_opacity
+                    analysis_model, image_bytes, confidence, image_size, mask_opacity
                 )
             except Exception as error:
                 st.exception(error)
@@ -1751,7 +1760,7 @@ def render_live_sample_results(
         st.rerun()
 
 
-def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> None:
+def render_live_camera(model: YOLO | None, confidence: float, mask_opacity: float) -> None:
     """Mantiene la cámara activa y ejecuta el tracker solo cuando el usuario lo inicia."""
     if not WEBRTC_AVAILABLE:
         st.error("No se pudo cargar el componente de cámara en vivo.")
@@ -1873,8 +1882,9 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             return
 
         state.reset_metrics()
-        with LIVE_INFERENCE_LOCK:
-            reset_trackers(model)
+        if model is not None:
+            with LIVE_INFERENCE_LOCK:
+                reset_trackers(model)
         if lot_name:
             remember_pool(lot_name)
         # El botón de detección también puede iniciar la cámara; así no queda
@@ -1917,6 +1927,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
     def run_live_inference(image: np.ndarray, generation: int) -> None:
         """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
         try:
+            if model is None:
+                raise RuntimeError("El modelo aún no está listo; vuelve a iniciar la detección.")
             with LIVE_INFERENCE_LOCK:
                 results = model.track(
                     source=image,
@@ -2641,10 +2653,6 @@ def main() -> None:
     if model_path is None and MODEL_BACKEND in {"openvino", "ov"}:
         st.session_state["openvino_fallback"] = True
         model_path = default_pt_model_path()
-        st.warning(
-            "No se pudo preparar el modelo OpenVINO; se está usando `.pt` como respaldo. "
-            "La detección continúa disponible mientras se revisa la compatibilidad del CPU."
-        )
     if model_path is None or not (model_path.is_file() or is_openvino_model_dir(model_path)):
         if MODEL_BACKEND in {"openvino", "ov"}:
             st.error(
@@ -2655,34 +2663,56 @@ def main() -> None:
             st.error("No se encontró el archivo del modelo `best.pt`.")
         st.stop()
 
-    try:
-        model = get_session_model(model_path)
-    except Exception as error:
-        if MODEL_BACKEND in {"openvino", "ov"} and model_path.is_dir():
-            st.session_state["openvino_fallback"] = True
-            fallback_path = default_pt_model_path()
-            try:
-                model = get_session_model(fallback_path)
-                st.warning(
-                    "OpenVINO no pudo compilarse en este CPU; se está usando `.pt` como respaldo. "
-                    "La app continúa funcionando, pero este equipo requiere otra optimización."
-                )
-                model_path = fallback_path
-            except Exception as fallback_error:
-                st.error(f"No fue posible cargar el modelo OpenVINO ni el respaldo `.pt`: {fallback_error}")
+    def get_app_model() -> YOLO:
+        """Carga el modelo solo cuando el modo elegido realmente lo necesita."""
+        nonlocal model_path
+        try:
+            loaded_model = get_session_model(model_path)
+        except Exception as error:
+            if MODEL_BACKEND in {"openvino", "ov"} and model_path.is_dir():
+                st.session_state["openvino_fallback"] = True
+                fallback_path = default_pt_model_path()
+                try:
+                    loaded_model = get_session_model(fallback_path)
+                    st.warning(
+                        "OpenVINO no pudo compilarse en este CPU; se está usando `.pt` como respaldo. "
+                        "La app continúa funcionando, pero este equipo requiere otra optimización."
+                    )
+                    model_path = fallback_path
+                except Exception as fallback_error:
+                    st.error(
+                        "No fue posible cargar el modelo OpenVINO ni el respaldo `.pt`: "
+                        f"{fallback_error}"
+                    )
+                    st.stop()
+            else:
+                st.error(f"No fue posible cargar el modelo: {error}")
                 st.stop()
-        else:
-            st.error(f"No fue posible cargar el modelo: {error}")
+
+        if loaded_model.task != "segment":
+            st.error(
+                f"El modelo cargado es de tipo `{loaded_model.task}`. "
+                "Esta aplicación requiere un modelo de segmentación."
+            )
             st.stop()
+        return loaded_model
 
-    if model.task != "segment":
-        st.error(f"El modelo cargado es de tipo `{model.task}`. Esta aplicación requiere un modelo de segmentación.")
-        st.stop()
-
-    analysis_mode = st.radio("Modo de análisis", ["Foto", "Video"], horizontal=True)
+    analysis_mode = st.radio(
+        "Modo de análisis",
+        ["Foto", "Video"],
+        horizontal=True,
+        key="analysis_mode",
+    )
     if analysis_mode == "Foto":
         render_photo_mode(
-            model, confidence, image_size, mask_opacity, low_limit, medium_limit, high_limit
+            None,
+            confidence,
+            image_size,
+            mask_opacity,
+            low_limit,
+            medium_limit,
+            high_limit,
+            model_loader=get_app_model,
         )
         return
 
@@ -2690,6 +2720,11 @@ def main() -> None:
         "Sección de video", ["Cámara en vivo", "Subir video"], horizontal=True, key="video_section"
     )
     if video_section == "Cámara en vivo":
+        detection_requested = bool(
+            st.session_state.get("live_detection_requested", False)
+            or get_live_session_state().snapshot()["detection_active"]
+        )
+        model = get_app_model() if detection_requested else None
         render_live_camera(model, confidence, mask_opacity)
         return
 
@@ -2706,6 +2741,8 @@ def main() -> None:
     show_video_masks = video_display == "Con máscaras"
     if not st.button("Analizar y reproducir detección", type="primary", use_container_width=True):
         return
+
+    model = get_app_model()
 
     st.subheader("Detección en curso")
     st.caption(
