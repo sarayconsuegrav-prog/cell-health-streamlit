@@ -7,6 +7,7 @@ segmentación, sin cajas delimitadoras ni etiquetas.
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 from html import escape
 import json
@@ -66,6 +67,10 @@ LIVE_IMAGE_SIZE = 640
 VIDEO_IMAGE_SIZE = 512
 LIVE_INFERENCE_EVERY_N_FRAMES = 3
 VIDEO_INFERENCE_STRIDE = 2
+VIDEO_OUTPUT_MAX_WIDTH = 1280
+# Las mediciones se usan para promedios; conservar cada observación de cada
+# fotograma puede hacer crecer la RAM sin mejorar de forma apreciable el reporte.
+MAX_MEASUREMENT_OBSERVATIONS = 2000
 LIVE_RESOLUTIONS = {
     "640 × 480 (480p)": {
         "width": 640,
@@ -673,9 +678,14 @@ def collect_measurement_samples(
         area_px2 = float(cv2.contourArea(contour))
         if area_px2 <= 0:
             continue
-        samples["areas_px2"][category].append(area_px2)
-        samples["perimeters_px"][category].append(float(cv2.arcLength(contour, True)))
-        samples["diameters_px"][category].append(math.sqrt(4.0 * area_px2 / math.pi))
+        area_values = samples["areas_px2"][category]
+        perimeter_values = samples["perimeters_px"][category]
+        diameter_values = samples["diameters_px"][category]
+        if len(area_values) >= MAX_MEASUREMENT_OBSERVATIONS:
+            continue
+        area_values.append(area_px2)
+        perimeter_values.append(float(cv2.arcLength(contour, True)))
+        diameter_values.append(math.sqrt(4.0 * area_px2 / math.pi))
 
 
 def summarize_measurement_samples(
@@ -1055,6 +1065,9 @@ def process_video(
 
     capture: cv2.VideoCapture | None = None
     writer: cv2.VideoWriter | None = None
+    results: Any | None = None
+    track_votes: dict[int, Counter] | None = None
+    video_measurement_samples: dict[str, dict[str, list[float]]] | None = None
     try:
         uploaded_video.seek(0)
         with source_path.open("wb") as target:
@@ -1080,15 +1093,20 @@ def process_video(
         # Se guardan los fotogramas analizados a una tasa proporcional para que
         # el video final conserve aproximadamente la misma duración.
         output_fps = max(fps / frame_stride, 1.0)
+        output_width = min(width, VIDEO_OUTPUT_MAX_WIDTH)
+        output_height = max(1, round(height * output_width / width))
         writer = cv2.VideoWriter(
-            str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (width, height)
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            output_fps,
+            (output_width, output_height),
         )
         if not writer.isOpened():
             raise RuntimeError("No se pudo crear el video de salida en formato MP4.")
 
         reset_trackers(model)
         model_names = {int(key): str(value) for key, value in model.names.items()}
-        track_votes: dict[int, Counter] = defaultdict(Counter)
+        track_votes = defaultdict(Counter)
         tracked_detections = 0
         processed_frames = 0
         last_preview_update = 0.0
@@ -1115,6 +1133,12 @@ def process_video(
                 if show_masks
                 else result.orig_img
             )
+            if output_frame.shape[1] != output_width or output_frame.shape[0] != output_height:
+                output_frame = cv2.resize(
+                    output_frame,
+                    (output_width, output_height),
+                    interpolation=cv2.INTER_AREA,
+                )
             writer.write(output_frame)
             tracked_detections += update_track_votes(result, track_votes, model_names)
             processed_frames += 1
@@ -1178,6 +1202,14 @@ def process_video(
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        results = None
+        if track_votes is not None:
+            track_votes.clear()
+        if video_measurement_samples is not None:
+            for values_by_category in video_measurement_samples.values():
+                for values in values_by_category.values():
+                    values.clear()
+        gc.collect()
 
 
 def render_photo_mode(
@@ -2477,13 +2509,6 @@ def main() -> None:
 
     try:
         model = get_session_model(model_path)
-        if model_path.is_dir() and not st.session_state.get("openvino_warmed"):
-            model.predict(
-                source=np.zeros((LIVE_IMAGE_SIZE, LIVE_IMAGE_SIZE, 3), dtype=np.uint8),
-                imgsz=LIVE_IMAGE_SIZE,
-                verbose=False,
-            )
-            st.session_state["openvino_warmed"] = True
     except Exception as error:
         if MODEL_BACKEND in {"openvino", "ov"} and model_path.is_dir():
             st.session_state["openvino_fallback"] = True
@@ -2559,6 +2584,7 @@ def main() -> None:
     except Exception as error:
         progress_bar.empty()
         status_text.empty()
+        gc.collect()
         st.exception(error)
         return
 
@@ -2614,6 +2640,8 @@ def main() -> None:
             "Las medidas promedio se calcularon con las máscaras de los fotogramas analizados "
             f"({video_measurements['calibration_method']})."
         )
+    del video_masks
+    gc.collect()
 
 
 if __name__ == "__main__":
