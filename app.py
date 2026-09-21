@@ -2064,15 +2064,12 @@ def render_live_camera(
         state.show_healthy_masks = show_healthy_masks
         state.show_sick_masks = show_sick_masks
 
-    # Los tres controles viven fuera del video. `desired_playing_state` le indica
-    # a streamlit-webrtc cuándo iniciar/detener la cámara y oculta sus controles
-    # nativos dentro del recuadro.
+    # Los tres controles viven fuera del video. Se usan las columnas directamente
+    # en lugar de `st.empty()`: los placeholders podían conservar un contenedor
+    # vacío después de un rerun de WebRTC y aparentar un segundo control blanco.
     camera_action, detection_action, save_action = st.columns(
         [1.05, 1.25, 1.15], gap="small"
     )
-    camera_action_slot = camera_action.empty()
-    detection_action_slot = detection_action.empty()
-    save_action_slot = save_action.empty()
 
     def toggle_live_camera() -> None:
         """Solicita iniciar o detener la cámara desde el botón exterior."""
@@ -2296,7 +2293,7 @@ def render_live_camera(
                 return make_output_frame(image)
             return frame
 
-    with camera_action_slot:
+    with camera_action:
         st.button(
             "Detener cámara" if camera_requested else "Iniciar cámara",
             type="secondary" if camera_requested else "primary",
@@ -2392,7 +2389,7 @@ def render_live_camera(
     detection_is_active = state.snapshot()["detection_active"] or bool(
         st.session_state.get("live_detection_requested", False)
     )
-    with detection_action_slot:
+    with detection_action:
         detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
         st.button(
             detection_label,
@@ -2411,7 +2408,7 @@ def render_live_camera(
         "live_detection_requested", False
     ):
         ensure_live_model()
-    with save_action_slot:
+    with save_action:
         snapshot_after_action = state.snapshot()
         if st.button(
             "Guardar muestra",
