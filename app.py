@@ -2176,13 +2176,20 @@ def render_live_camera(
         st.session_state.pop("live_camera_start_required", None)
 
     def toggle_live_detection() -> None:
-        """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
-        if state.snapshot()["detection_active"] or st.session_state.get(
+        """Cambia la detección sin desmontar el componente WebRTC."""
+        snapshot = state.snapshot()
+        if snapshot["detection_active"] or st.session_state.get(
             "live_detection_requested", False
         ):
             state.set_detection_active(False)
             persist_pending_live_sample(state)
             st.session_state["live_detection_requested"] = False
+            return
+
+        # Una muestra detenida debe guardarse antes de comenzar la siguiente.
+        # Así las cuatro placas permanecen independientes y nunca se descarta
+        # silenciosamente el resultado anterior al iniciar la nueva.
+        if snapshot["sample_ready"]:
             return
 
         state.reset_metrics()
@@ -2478,12 +2485,16 @@ def render_live_camera(
                 60.0,
             )
 
-    detection_is_active = state.snapshot()["detection_active"] or bool(
+    detection_snapshot = state.snapshot()
+    detection_is_active = detection_snapshot["detection_active"] or bool(
         st.session_state.get("live_detection_requested", False)
+    )
+    sample_waiting_to_save = bool(
+        detection_snapshot["sample_ready"] and not detection_is_active
     )
     with detection_action:
         detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
-        detection_button_clicked = st.button(
+        st.button(
             detection_label,
             type="primary",
             key="live_detection_toggle",
@@ -2491,13 +2502,10 @@ def render_live_camera(
             disabled=(
                 completed_count >= MAX_LIVE_SAMPLES
                 or not camera_requested
+                or sample_waiting_to_save
             ),
+            on_click=toggle_live_detection,
         )
-    if detection_button_clicked:
-        # Ejecutar el cambio en el cuerpo del rerun evita que el callback del
-        # botón compita con el callback WebRTC por el estado de la muestra.
-        toggle_live_detection()
-        st.rerun()
     if state.snapshot()["detection_active"] or st.session_state.get(
         "live_detection_requested", False
     ):
@@ -2660,7 +2668,9 @@ def main() -> None:
             .stButton > button, .stDownloadButton > button,
             button[kind="primary"], [data-testid="stBaseButton-primary"] {
                 background: #0f7c86 !important;
+                background-color: #0f7c86 !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 border: 1px solid #8ef4e8 !important;
                 font-weight: 750 !important;
                 min-height: 2.75rem;
@@ -2670,12 +2680,25 @@ def main() -> None:
             .stButton > button:focus-visible, .stDownloadButton > button:focus-visible,
             button[kind="primary"]:focus-visible, [data-testid="stBaseButton-primary"]:focus-visible {
                 background: #176b8a !important;
+                background-color: #176b8a !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+                border-color: #c4fffa !important;
+            }
+            .stButton > button:active, .stDownloadButton > button:active,
+            button[kind="primary"]:active, [data-testid="stBaseButton-primary"]:active,
+            button[kind="secondary"]:active, [data-testid="stBaseButton-secondary"]:active {
+                background: #176b8a !important;
+                background-color: #176b8a !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 border-color: #c4fffa !important;
             }
             button[kind="secondary"], [data-testid="stBaseButton-secondary"] {
                 background: #31546b !important;
+                background-color: #31546b !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 border: 1px solid #6bbfd1 !important;
                 font-weight: 750 !important;
                 min-height: 2.75rem;
@@ -2683,7 +2706,9 @@ def main() -> None:
             button[kind="secondary"]:hover, [data-testid="stBaseButton-secondary"]:hover,
             button[kind="secondary"]:focus-visible, [data-testid="stBaseButton-secondary"]:focus-visible {
                 background: #176b8a !important;
+                background-color: #176b8a !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 border-color: #c4fffa !important;
             }
             .stButton > button *, .stDownloadButton > button *,
@@ -2695,8 +2720,10 @@ def main() -> None:
             }
             .stButton > button:disabled, button[kind="primary"]:disabled {
                 background: #31546b !important;
+                background-color: #31546b !important;
                 border-color: #31546b !important;
                 color: #b6c8d5 !important;
+                -webkit-text-fill-color: #b6c8d5 !important;
                 opacity: 1 !important;
             }
             input, textarea { color: #ffffff !important; background: #0d3153 !important; }
@@ -2797,32 +2824,40 @@ def main() -> None:
             button[data-testid="stBaseButton-pillsActive"],
             [data-testid="stPills"] button[aria-pressed="true"] {
                 background: #176b8a !important;
+                background-color: #176b8a !important;
                 border-color: #6bbfd1 !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
             }
             [data-testid="stPills"] button * { color: inherit !important; }
             /* En Streamlit 1.64 los pills se renderizan como stButtonGroup.
                Cubrir el contenedor real evita el rojo/blanco del tema base. */
             [data-testid="stButtonGroup"] button {
                 background: #0d3153 !important;
+                background-color: #0d3153 !important;
                 border: 1px solid #41d8cc !important;
                 border-radius: 999px !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 box-shadow: none !important;
             }
             [data-testid="stButtonGroup"] button:hover,
             [data-testid="stButtonGroup"] button:focus-visible {
                 background: #176b8a !important;
+                background-color: #176b8a !important;
                 border-color: #c4fffa !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
                 outline: none !important;
             }
             [data-testid="stButtonGroup"] button[aria-pressed="true"],
             [data-testid="stButtonGroup"] button[aria-pressed="true"]:hover,
             [data-testid="stButtonGroup"] button[aria-pressed="true"]:focus-visible {
                 background: #176b8a !important;
+                background-color: #176b8a !important;
                 border-color: #c4fffa !important;
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
             }
             [data-testid="stButtonGroup"] button * { color: inherit !important; }
             /* El video debe permanecer en WebRTC: así conserva la frecuencia
