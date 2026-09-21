@@ -2202,6 +2202,7 @@ def render_live_camera(
                     state.inference_busy = False
 
     def process_live_frame(frame: Any) -> Any:
+        image: np.ndarray | None = None
         try:
             image = frame.to_ndarray(format="bgr24")
             with state.lock:
@@ -2220,7 +2221,10 @@ def render_live_camera(
                 inference_retry_at = state.inference_retry_at
 
             if not detection_active:
-                return frame
+                # No reutilizar el objeto recibido por aiortc: en algunas
+                # versiones del componente eso incrementa los contadores,
+                # pero deja el video de salida en blanco en el navegador.
+                return av.VideoFrame.from_ndarray(image, format="bgr24")
 
             # La captura se contabiliza antes de esperar a OpenVINO. Así,
             # detener la sesión siempre deja una muestra guardable, incluso
@@ -2276,6 +2280,8 @@ def render_live_camera(
             with state.lock:
                 state.last_error = f"{type(error).__name__}: {error}"
             # Si un cuadro puntual falla, se conserva el video en lugar de cerrar la cámara.
+            if image is not None:
+                return av.VideoFrame.from_ndarray(image, format="bgr24")
             return frame
 
     with camera_action_slot:
@@ -2543,8 +2549,18 @@ def main() -> None:
                 font-weight: 750 !important;
                 min-height: 2.75rem;
             }
+            button[kind="secondary"], [data-testid="stBaseButton-secondary"] {
+                background: #31546b !important;
+                color: #ffffff !important;
+                border: 1px solid #6bbfd1 !important;
+                font-weight: 750 !important;
+                min-height: 2.75rem;
+            }
             .stButton > button *, .stDownloadButton > button *,
             button[kind="primary"] *, [data-testid="stBaseButton-primary"] * {
+                color: #ffffff !important;
+            }
+            button[kind="secondary"] *, [data-testid="stBaseButton-secondary"] * {
                 color: #ffffff !important;
             }
             .stButton > button:disabled, button[kind="primary"]:disabled {
@@ -2567,10 +2583,26 @@ def main() -> None:
                 color: #a6d8eb !important;
                 opacity: 1 !important;
             }
+            [data-baseweb="input"],
+            [data-baseweb="input"] > div,
+            [data-baseweb="base-input"],
+            [data-baseweb="base-input"] > div {
+                background: #0d3153 !important;
+                border-color: #6bbfd1 !important;
+            }
+            [data-baseweb="input"] input,
+            [data-baseweb="base-input"] input {
+                background: transparent !important;
+                color: #ffffff !important;
+                caret-color: #ffffff !important;
+            }
             [data-testid="stSelectbox"] [data-baseweb="select"] > div {
                 background: #0d3153 !important;
                 border-color: #6bbfd1 !important;
                 color: #ffffff !important;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div > div {
+                background: #0d3153 !important;
             }
             [data-testid="stSelectbox"] [data-baseweb="select"] div,
             [data-testid="stSelectbox"] [data-baseweb="select"] span,
