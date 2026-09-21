@@ -7,6 +7,7 @@ segmentación, sin cajas delimitadoras ni etiquetas.
 from __future__ import annotations
 
 import csv
+import base64
 from copy import deepcopy
 import gc
 import hashlib
@@ -2380,7 +2381,15 @@ def render_live_camera(
                     [cv2.IMWRITE_JPEG_QUALITY, 82],
                 )
                 if encoded:
-                    st.image(preview_jpeg.tobytes(), use_container_width=True)
+                    preview_base64 = base64.b64encode(preview_jpeg.tobytes()).decode(
+                        "ascii"
+                    )
+                    st.markdown(
+                        '<img class="live-stream-image" '
+                        f'src="data:image/jpeg;base64,{preview_base64}" '
+                        'alt="Vista previa de la cámara" />',
+                        unsafe_allow_html=True,
+                    )
                 else:
                     st.error("No se pudo preparar el fotograma de la cámara.")
 
@@ -2846,6 +2855,16 @@ def main() -> None:
                 border-radius: 12px;
                 color: #a6d8eb;
                 text-align: center;
+            }
+            .live-stream-image {
+                display: block;
+                width: 100%;
+                height: auto;
+                min-height: 12rem;
+                object-fit: contain;
+                background: #061a33;
+                border: 1px solid #2c8396;
+                border-radius: 12px;
             }
             .live-preview-footer {
                 margin-top: 0.35rem;
