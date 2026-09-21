@@ -2011,7 +2011,11 @@ def render_live_camera(
             type="primary",
             key="live_detection_toggle",
             use_container_width=True,
-            disabled=completed_count >= MAX_LIVE_SAMPLES,
+            disabled=(
+                completed_count >= MAX_LIVE_SAMPLES
+                or not camera_is_requested
+            ),
+            help="Primero pulsa Iniciar cámara para habilitar la detección.",
             on_click=toggle_live_detection,
         )
     if state.snapshot()["detection_active"] or st.session_state.get(
