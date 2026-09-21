@@ -2368,11 +2368,21 @@ def render_live_camera(
                 # Streamlit espera RGB para la imagen renderizada. El callback
                 # trabaja en BGR porque OpenCV/aiortc lo usa internamente.
                 preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
-                st.image(
+                # En algunos navegadores Streamlit no logra servir de forma
+                # estable un ndarray actualizado dentro de un fragmento. En
+                # ese caso el elemento queda como imagen rota aunque el
+                # contador confirme que WebRTC sí recibe fotogramas. Entregar
+                # JPEG bytes mantiene la vista previa ligera y evita esa
+                # serialización fallida.
+                encoded, preview_jpeg = cv2.imencode(
+                    ".jpg",
                     preview_rgb,
-                    channels="RGB",
-                    use_container_width=True,
+                    [cv2.IMWRITE_JPEG_QUALITY, 82],
                 )
+                if encoded:
+                    st.image(preview_jpeg.tobytes(), use_container_width=True)
+                else:
+                    st.error("No se pudo preparar el fotograma de la cámara.")
 
         # SENDONLY evita que streamlit-webrtc pinte su Placeholder blanco y
         # sus controles internos. El cuadro procesado se muestra con Streamlit
