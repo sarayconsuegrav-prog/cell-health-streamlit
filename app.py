@@ -297,17 +297,14 @@ def overlay_masks(image: np.ndarray, masks: np.ndarray, opacity: float) -> np.nd
 def draw_live_status_overlay(
     image: np.ndarray,
     detection_active: bool,
-    initializing: bool = False,
 ) -> np.ndarray:
     """Dibuja una señal visible sobre el video para indicar el estado actual."""
     output = image.copy()
     height, width = output.shape[:2]
-    if detection_active:
-        label = "INICIANDO DETECCION..." if initializing else "EN VIVO - DETECCION"
-        badge_color = (40, 40, 220)  # rojo en BGR
-    else:
-        label = "VISTA PREVIA"
-        badge_color = (180, 150, 45)  # azul/amarillo suave en BGR
+    if not detection_active:
+        return output
+    label = "EN VIVO"
+    badge_color = (40, 40, 220)  # rojo en BGR
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.48, min(0.82, width / 1500))
@@ -1410,18 +1407,13 @@ def render_live_metrics_panel(
         snapshot = state.snapshot()
         completed_samples = state.completed_samples_snapshot()
         counts = snapshot["counts"]
-        if snapshot["detection_active"] and snapshot["processed_frames"] == 0:
-            status = "INICIANDO DETECCIÓN"
-        elif snapshot["detection_active"]:
-            status = "DETECCIÓN ACTIVA"
-        else:
-            status = "VISTA PREVIA"
-        status_class = "live-metrics-active" if snapshot["detection_active"] else "live-metrics-idle"
         sample_number = min(len(completed_samples) + 1, MAX_LIVE_SAMPLES)
         current_card = ""
-        if snapshot["detection_active"]:
+        if snapshot["detection_active"] or (
+            snapshot["processed_frames"] > 0 and len(completed_samples) < MAX_LIVE_SAMPLES
+        ):
             current_card = metric_card(
-                f"Camarón muestra {sample_number} · en curso",
+                f"Camarón muestra {sample_number}",
                 current_sample_code or "Código pendiente",
                 counts,
                 snapshot["measurements"],
@@ -1459,16 +1451,10 @@ def render_live_metrics_panel(
 
         cards = current_card + sample_cards + aggregate_card
         if not cards:
-            cards = '<p class="live-empty-metrics">Inicia la detección para ver las métricas de la muestra.</p>'
+            return
 
         st.markdown(
             f"""
-            <section class="live-metrics-panel">
-              <span class="live-status-badge {status_class}">{status}</span>
-              <h3>Métricas del lote</h3>
-              <div class="live-status-row"><span>Nombre de la piscina / lote</span><strong>{escape(lot_name or 'Sin nombre')}</strong></div>
-              <div class="live-status-row"><span>Fotogramas de la muestra actual</span><strong>{snapshot['processed_frames']:,}</strong></div>
-            </section>
             <div class="live-sample-cards">{cards}</div>
             """,
             unsafe_allow_html=True,
@@ -1552,9 +1538,6 @@ def render_live_sample_results(
             use_container_width=True,
             key="live_samples_report",
         )
-    else:
-        st.info(f"Completa las {MAX_LIVE_SAMPLES} muestras para habilitar el reporte final del lote.")
-
     if st.button(
         "Nuevo lote / análisis",
         key="live_new_analysis",
@@ -1628,7 +1611,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
         else:
             lot_name = normalize_pool_name(selected_pool)
         st.session_state["live_lot_name"] = lot_name
-        st.caption("Las piscinas guardadas vuelven a aparecer en este navegador.")
 
     current_sample_number = min(completed_count + 1, MAX_LIVE_SAMPLES)
     sample_code_key = f"live_sample_code_{current_sample_number}"
@@ -1641,11 +1623,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             disabled=state.snapshot()["detection_active"],
             help="Cada muestra debe tener un código para identificarla en el reporte.",
         ).strip()
-        st.caption("Cada camarón conserva su código individual en el reporte.")
-    st.caption(
-        f"Se analizarán exactamente {MAX_LIVE_SAMPLES} camarones de este lote. "
-        f"Muestras finalizadas: {completed_count}/{MAX_LIVE_SAMPLES}."
-    )
     resolution_label = st.selectbox(
         "Resolución de captura de video",
         list(LIVE_RESOLUTIONS),
@@ -1673,8 +1650,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
         state.show_healthy_masks = show_healthy_masks
         state.show_sick_masks = show_sick_masks
 
-    camera_action, detection_action, stop_action, camera_hint = st.columns(
-        [1.15, 1.25, 1.15, 2.45], gap="small"
+    camera_action, detection_action, save_action = st.columns(
+        [1.15, 1.25, 1.15], gap="small"
     )
     detection_is_active = state.snapshot()["detection_active"]
     with camera_action:
@@ -1683,56 +1660,50 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             next_camera_state = not camera_is_requested
             st.session_state["live_camera_requested"] = next_camera_state
             if not next_camera_state:
-                if detection_is_active:
-                    state.set_detection_active(False)
-                    state.save_current_sample(sample_code, lot_name)
+                state.set_detection_active(False)
             st.rerun()
     with detection_action:
+        detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
         if st.button(
-            "Iniciar detección",
+            detection_label,
             type="primary",
-            key="live_detection_start",
+            key="live_detection_toggle",
             use_container_width=True,
             disabled=(
                 not camera_is_requested
-                or detection_is_active
                 or completed_count >= MAX_LIVE_SAMPLES
-                or not lot_name
-                or not sample_code
+                or (
+                    not detection_is_active
+                    and (not lot_name or not sample_code)
+                )
             ),
         ):
-            state.reset_metrics()
-            with LIVE_INFERENCE_LOCK:
-                reset_trackers(model)
-            if lot_name:
-                remember_pool(lot_name)
-            state.set_detection_active(True)
-            detection_is_active = True
-            # No forzamos un rerun aquí: al conservar el componente WebRTC
-            # conectado, el callback recibe el siguiente fotograma de inmediato.
-            # El panel de métricas se actualiza mediante su propio fragmento.
-    with stop_action:
+            if detection_is_active:
+                state.set_detection_active(False)
+                detection_is_active = False
+            else:
+                state.reset_metrics()
+                with LIVE_INFERENCE_LOCK:
+                    reset_trackers(model)
+                if lot_name:
+                    remember_pool(lot_name)
+                state.set_detection_active(True)
+                detection_is_active = True
+    with save_action:
+        snapshot_after_action = state.snapshot()
         if st.button(
-            "Detener y guardar muestra",
-            key="live_detection_stop",
+            "Guardar muestra",
+            key="live_sample_save",
             use_container_width=True,
-            disabled=not detection_is_active,
+            disabled=(
+                detection_is_active
+                or completed_count >= MAX_LIVE_SAMPLES
+                or snapshot_after_action["processed_frames"] <= 0
+            ),
         ):
             state.set_detection_active(False)
             if state.save_current_sample(sample_code, lot_name):
                 st.rerun()
-            st.warning("Aún no hay fotogramas analizados para guardar esta muestra.")
-    with camera_hint:
-        if completed_count >= MAX_LIVE_SAMPLES:
-            st.caption("Las cuatro muestras ya están completas. Descarga el reporte del lote al finalizar.")
-        elif camera_is_requested and detection_is_active:
-            st.caption("Al pulsar Detener y guardar muestra se registran las métricas del camarón actual.")
-        elif camera_is_requested and (not lot_name or not sample_code):
-            st.caption("Selecciona o registra una piscina y escribe el código del camarón antes de iniciar.")
-        elif camera_is_requested:
-            st.caption("La detección se inicia y se detiene con sus propios botones. El código actual se guardará en el reporte.")
-        else:
-            st.caption("Selecciona la resolución, inicia la cámara y luego comienza la detección de la muestra.")
 
     model_names = {int(key): str(value) for key, value in model.names.items()}
 
@@ -1787,15 +1758,13 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 cached_shape = state.cached_shape
                 cached_healthy_masks = state.cached_healthy_masks
                 cached_sick_masks = state.cached_sick_masks
-                processed_frames = state.processed_frames
                 inference_busy = state.inference_busy
                 inference_generation = state.inference_generation
                 show_healthy = state.show_healthy_masks
                 show_sick = state.show_sick_masks
 
             if not detection_active:
-                preview = draw_live_status_overlay(image, False)
-                return av.VideoFrame.from_ndarray(preview, format="bgr24")
+                return frame
 
             needs_inference = (
                 cached_healthy_masks is None
@@ -1829,7 +1798,6 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             output = draw_live_status_overlay(
                 output,
                 True,
-                initializing=processed_frames == 0 or inference_busy,
             )
             return av.VideoFrame.from_ndarray(output, format="bgr24")
         except Exception as error:
@@ -1885,14 +1853,7 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 30.0,
                 60.0,
             )
-        st.caption(
-            "La inferencia se ajusta internamente para mantener una respuesta fluida."
-        )
     else:
-        st.markdown(
-            '<div class="camera-idle">Pulsa <strong>Iniciar cámara</strong> para mostrar la vista previa. La detección comenzará solo cuando pulses <strong>Iniciar detección</strong>.</div>',
-            unsafe_allow_html=True,
-        )
         render_live_metrics_panel(
             state,
             lot_name,
@@ -2151,64 +2112,6 @@ def main() -> None:
                 color: #a6d8eb;
                 font-size: 0.72rem;
             }
-            .camera-idle {
-                max-width: 40rem;
-                margin-top: 0.75rem;
-                padding: 1.1rem 1.2rem;
-                background: #0a2745;
-                border: 1px dashed #41d8cc;
-                border-radius: 12px;
-                color: #a6d8eb;
-                text-align: center;
-            }
-            .camera-idle strong { color: #ffffff; }
-            .live-metrics-panel {
-                box-sizing: border-box;
-                min-height: 9rem;
-                padding: 1.15rem 1.25rem;
-                background: #0a2745;
-                border: 1px solid #41d8cc;
-                border-radius: 14px;
-                color: #ffffff;
-            }
-            .live-status-badge {
-                display: inline-block;
-                padding: 0.3rem 0.55rem;
-                border-radius: 999px;
-                background: rgba(18, 184, 194, 0.18);
-                color: #a6f5f0;
-                font-size: 0.7rem;
-                font-weight: 800;
-                letter-spacing: 0.04em;
-            }
-            .live-metrics-active {
-                background: rgba(18, 184, 194, 0.25);
-                color: #c4fffa;
-            }
-            .live-metrics-idle {
-                background: rgba(166, 216, 235, 0.12);
-                color: #a6d8eb;
-            }
-            .live-metrics-panel h3 {
-                margin: 0.8rem 0 0.35rem;
-                color: #ffffff;
-                font-size: 1.25rem;
-            }
-            .live-metrics-panel p {
-                margin: 0 0 0.7rem;
-                color: #a6d8eb !important;
-                line-height: 1.45;
-                font-size: 0.88rem;
-            }
-            .live-status-row {
-                display: flex;
-                flex-direction: column;
-                gap: 0.18rem;
-                padding: 0.85rem 0;
-                border-top: 1px solid rgba(107, 231, 218, 0.22);
-            }
-            .live-status-row span { color: #a6d8eb; font-size: 0.78rem; }
-            .live-status-row strong { color: #ffffff; font-size: 0.95rem; }
             .live-measurements-heading {
                 margin: 1rem 0 0.45rem;
                 color: #a6f5f0;
@@ -2564,9 +2467,6 @@ def main() -> None:
         else:
             st.error(f"No fue posible cargar el modelo: {error}")
             st.stop()
-
-    backend_label = "OpenVINO CPU" if model_path.is_dir() else "PyTorch (.pt)"
-    st.caption(f"Motor de inferencia: {backend_label}")
 
     if model.task != "segment":
         st.error(f"El modelo cargado es de tipo `{model.task}`. Esta aplicación requiere un modelo de segmentación.")
