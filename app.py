@@ -1694,9 +1694,23 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
             if not next_camera_state:
                 state.set_detection_active(False)
             st.rerun()
+
+    def toggle_live_detection() -> None:
+        """Cambia la detección antes de que Streamlit vuelva a dibujar la interfaz."""
+        if state.snapshot()["detection_active"]:
+            state.set_detection_active(False)
+            return
+
+        state.reset_metrics()
+        with LIVE_INFERENCE_LOCK:
+            reset_trackers(model)
+        if lot_name:
+            remember_pool(lot_name)
+        state.set_detection_active(True)
+
     with detection_action:
         detection_label = "Detener detección" if detection_is_active else "Iniciar detección"
-        if st.button(
+        st.button(
             detection_label,
             type="primary",
             key="live_detection_toggle",
@@ -1705,18 +1719,8 @@ def render_live_camera(model: YOLO, confidence: float, mask_opacity: float) -> N
                 not camera_is_requested
                 or completed_count >= MAX_LIVE_SAMPLES
             ),
-        ):
-            if detection_is_active:
-                state.set_detection_active(False)
-                detection_is_active = False
-            else:
-                state.reset_metrics()
-                with LIVE_INFERENCE_LOCK:
-                    reset_trackers(model)
-                if lot_name:
-                    remember_pool(lot_name)
-                state.set_detection_active(True)
-                detection_is_active = True
+            on_click=toggle_live_detection,
+        )
     with save_action:
         snapshot_after_action = state.snapshot()
         if st.button(
