@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 from copy import deepcopy
+from datetime import datetime
 import gc
 import hashlib
 from html import escape
@@ -101,6 +102,10 @@ LIVE_RESOLUTIONS = {
 MAX_LIVE_SAMPLES = 4
 POOL_QUERY_KEY = "cell_pools"
 NEW_POOL_OPTION = "➕ Registrar nueva piscina"
+WHITE_SPOT_LABEL = "Mancha blanca (WSSV)"
+VACUOLIZATION_LABEL = "Vacuolización"
+HISTORY_LABEL = "Historial"
+HISTORY_STATE_KEY = "analysis_history"
 # OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
 # Estos son los nombres incluidos en `models/best_openvino_model/metadata.yaml`.
 DEFAULT_MODEL_NAMES = {
@@ -773,9 +778,14 @@ class LiveSessionState:
 
     def clear_completed_samples(self) -> None:
         with self.lock:
+            history_paths = {
+                str(record.get("recording_path") or "").strip()
+                for record in get_analysis_history()
+                if record.get("recording_path")
+            }
             for sample in self.completed_samples:
                 recording_path = sample.get("recording_path")
-                if recording_path:
+                if recording_path and str(recording_path) not in history_paths:
                     try:
                         Path(recording_path).unlink(missing_ok=True)
                     except OSError:
@@ -951,6 +961,157 @@ def persist_pending_live_sample(state: LiveSessionState) -> None:
         st.session_state.pop("live_pending_sample", None)
     else:
         st.session_state["live_pending_sample"] = pending_sample
+
+
+def get_analysis_history() -> list[dict[str, Any]]:
+    """Obtiene el historial de la sesión sin guardar videos completos en RAM."""
+    history = st.session_state.get(HISTORY_STATE_KEY)
+    if not isinstance(history, list):
+        history = []
+        st.session_state[HISTORY_STATE_KEY] = history
+    return history
+
+
+def add_live_sample_to_history(
+    sample: dict[str, Any],
+    low_limit: float = 10.0,
+    medium_limit: float = 30.0,
+    high_limit: float = 60.0,
+) -> None:
+    """Registra una muestra guardada para consultarla desde Historial.
+
+    El video se conserva como una ruta temporal para no duplicarlo en la memoria
+    de Streamlit. La persistencia duradera se conectará después con Microsoft.
+    """
+    history = get_analysis_history()
+    recording_path = str(sample.get("recording_path") or "").strip()
+    sample_number = int(sample.get("sample_number", 0) or 0)
+    lot_name = str(sample.get("lot_name") or "Lote sin nombre").strip()
+    code = str(sample.get("code") or f"Muestra-{sample_number}").strip()
+    existing = next(
+        (
+            record
+            for record in history
+            if record.get("analysis_type") == WHITE_SPOT_LABEL
+            and record.get("recording_path") == recording_path
+            and record.get("sample_number") == sample_number
+            and record.get("lot_name") == lot_name
+        ),
+        None,
+    )
+    affected_percentage, grade, description = sample_result_grade(
+        sample.get("counts", {}),
+        low_limit,
+        medium_limit,
+        high_limit,
+    )
+    if existing is not None:
+        existing.update(
+            {
+                "sample_code": code,
+                "grade": grade,
+                "description": description,
+                "affected_percentage": affected_percentage,
+            }
+        )
+        return
+
+    history.append(
+        {
+            "history_id": f"wssv-{len(history) + 1}-{time.time_ns()}",
+            "analysis_type": WHITE_SPOT_LABEL,
+            "model_label": WHITE_SPOT_LABEL,
+            "sample_number": sample_number,
+            "sample_label": str(sample.get("label") or f"Camarón muestra {sample_number}"),
+            "sample_code": code,
+            "lot_name": lot_name,
+            "captured_at": datetime.now().astimezone().strftime("%d/%m/%Y · %H:%M"),
+            "grade": grade,
+            "description": description,
+            "affected_percentage": affected_percentage,
+            "counts": dict(sample.get("counts") or {}),
+            "measurements": dict(sample.get("measurements") or {})
+            if sample.get("measurements")
+            else None,
+            "recording_path": recording_path,
+        }
+    )
+
+
+def sync_history_sample_codes(samples: list[dict[str, Any]]) -> None:
+    """Refleja en el historial las correcciones de código hechas por el usuario."""
+    history = get_analysis_history()
+    for sample in samples:
+        for record in history:
+            if (
+                record.get("analysis_type") == WHITE_SPOT_LABEL
+                and record.get("sample_number") == sample.get("sample_number")
+                and record.get("lot_name") == sample.get("lot_name")
+                and record.get("recording_path") == str(sample.get("recording_path") or "")
+            ):
+                record["sample_code"] = str(sample.get("code") or "").strip()
+
+
+def render_analysis_history() -> None:
+    """Renderiza el historial filtrable con reproducción de videos de la sesión."""
+    st.subheader("Historial")
+    st.caption(
+        "Consulta las muestras guardadas por tipo de análisis. Cada registro conserva "
+        "código, grado, piscina, fecha y el video capturado cuando sigue disponible."
+    )
+    selected_type = st.selectbox(
+        "Tipo de historial",
+        [WHITE_SPOT_LABEL, VACUOLIZATION_LABEL],
+        key="history_model_filter",
+    )
+    records = [
+        record
+        for record in reversed(get_analysis_history())
+        if record.get("model_label") == selected_type
+    ]
+    if not records:
+        st.markdown(
+            f'<div class="history-empty"><strong>{escape(selected_type)}</strong>'
+            "<span>Aún no hay muestras guardadas en este historial.</span></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        f'<div class="history-count">{len(records)} muestra(s) en {escape(selected_type)}</div>',
+        unsafe_allow_html=True,
+    )
+    for record in records:
+        recording_path = str(record.get("recording_path") or "").strip()
+        video_available = bool(recording_path and Path(recording_path).is_file())
+        video_state = "Video disponible" if video_available else "Video no disponible en esta sesión"
+        st.markdown(
+            f"""
+            <article class="history-card">
+              <div class="history-card-heading">
+                <div>
+                  <span class="history-card-kicker">{escape(str(record.get('model_label') or selected_type))}</span>
+                  <strong>{escape(str(record.get('sample_label') or 'Muestra'))}</strong>
+                </div>
+                <span class="history-card-grade">{escape(str(record.get('grade') or 'Sin grado'))}</span>
+              </div>
+              <div class="history-card-grid">
+                <div><span>Fecha</span><strong>{escape(str(record.get('captured_at') or '—'))}</strong></div>
+                <div><span>Piscina / lote</span><strong>{escape(str(record.get('lot_name') or '—'))}</strong></div>
+                <div><span>Código</span><strong>{escape(str(record.get('sample_code') or '—'))}</strong></div>
+                <div><span>Video</span><strong>{escape(video_state)}</strong></div>
+              </div>
+            </article>
+            """,
+            unsafe_allow_html=True,
+        )
+        if video_available:
+            st.video(recording_path)
+        else:
+            st.caption(
+                "El registro y sus datos permanecen en el historial de esta sesión; "
+                "el almacenamiento permanente del video se conectará con Microsoft."
+            )
 
 
 def normalize_pool_name(value: str) -> str:
@@ -1997,6 +2158,7 @@ def render_live_sample_results(
             for sample_number, code in edited_codes.items():
                 state.update_completed_sample_code(sample_number, code)
             persist_completed_live_samples(state)
+            sync_history_sample_codes(state.completed_samples_snapshot())
             st.rerun()
 
     if len(samples) == MAX_LIVE_SAMPLES:
@@ -2524,6 +2686,9 @@ def render_live_camera(
                 remember_pool(lot_name)
             if state.save_current_sample(sample_code, lot_name):
                 persist_completed_live_samples(state)
+                saved_samples = state.completed_samples_snapshot()
+                if saved_samples:
+                    add_live_sample_to_history(saved_samples[-1])
                 st.session_state.pop("live_pending_sample", None)
                 st.session_state["live_save_feedback"] = "Muestra guardada correctamente."
                 st.rerun()
@@ -3384,6 +3549,89 @@ def main() -> None:
                 font-size: clamp(0.82rem, 1.4vw, 0.98rem) !important;
                 line-height: 1.45 !important;
             }
+            .history-count {
+                margin: 0.65rem 0 0.75rem;
+                color: #a6f5f0;
+                font-size: 0.78rem;
+                font-weight: 750;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+            }
+            .history-empty {
+                display: flex;
+                flex-direction: column;
+                gap: 0.3rem;
+                margin-top: 0.9rem;
+                padding: 1.1rem 1.2rem;
+                background: #0a2745;
+                border: 1px solid #2c8396;
+                border-radius: 12px;
+                color: #ffffff;
+            }
+            .history-empty span { color: #a6d8eb; font-size: 0.86rem; }
+            .history-card {
+                margin: 1rem 0 0.55rem;
+                padding: 0.95rem 1rem;
+                background: #0a2745;
+                border: 1px solid #2c8396;
+                border-radius: 13px;
+                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+            }
+            .history-card-heading {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 0.8rem;
+            }
+            .history-card-heading > div {
+                display: flex;
+                flex-direction: column;
+                gap: 0.2rem;
+                min-width: 0;
+            }
+            .history-card-kicker {
+                color: #a6f5f0;
+                font-size: 0.68rem;
+                font-weight: 800;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+            .history-card-heading strong {
+                color: #ffffff;
+                font-size: 1rem;
+            }
+            .history-card-grade {
+                flex: 0 0 auto;
+                padding: 0.35rem 0.6rem;
+                background: #176b8a;
+                border: 1px solid #6bbfd1;
+                border-radius: 999px;
+                color: #ffffff;
+                font-size: 0.78rem;
+                font-weight: 800;
+            }
+            .history-card-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 0.45rem;
+                margin-top: 0.8rem;
+            }
+            .history-card-grid div {
+                min-width: 0;
+                padding: 0.45rem 0.55rem;
+                background: rgba(13, 49, 83, 0.78);
+                border-radius: 7px;
+            }
+            .history-card-grid span,
+            .history-card-grid strong {
+                display: block;
+                overflow-wrap: anywhere;
+            }
+            .history-card-grid span { color: #a6d8eb; font-size: 0.66rem; }
+            .history-card-grid strong { margin-top: 0.15rem; color: #ffffff; font-size: 0.78rem; }
+            @media (max-width: 768px) {
+                .history-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            }
             [data-testid="stTabs"] {
                 margin: 0.35rem 0 1.1rem !important;
             }
@@ -3583,8 +3831,8 @@ def main() -> None:
     )
     analysis_mode = st.pills(
         "Sección principal",
-        ["Detección de mancha blanca", "Modelo de vacuolización"],
-        default="Detección de mancha blanca",
+        [WHITE_SPOT_LABEL, VACUOLIZATION_LABEL, HISTORY_LABEL],
+        default=WHITE_SPOT_LABEL,
         key="analysis_model_mode",
         label_visibility="collapsed",
     )
@@ -3761,7 +4009,7 @@ def main() -> None:
                 f"({video_measurements['calibration_method']})."
             )
 
-    if analysis_mode == "Detección de mancha blanca":
+    if analysis_mode == WHITE_SPOT_LABEL:
         photo_tab, video_tab = st.tabs(["Foto", "Video"])
         with photo_tab:
             render_photo_mode(
@@ -3793,8 +4041,10 @@ def main() -> None:
                 )
             with uploaded_video_tab:
                 render_uploaded_video_mode()
+    elif analysis_mode == VACUOLIZATION_LABEL:
+        st.info("La sección de vacuolización está preparada para incorporar su modelo.")
     else:
-        st.info("El modelo de vacuolización se incorporará en esta pestaña.")
+        render_analysis_history()
 
 
 if __name__ == "__main__":
