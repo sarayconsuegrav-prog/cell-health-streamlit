@@ -3441,6 +3441,12 @@ def main() -> None:
             [data-testid="stTabs"] [role="tab"]::after {
                 display: none !important;
             }
+            [data-testid="stTabs"] .react-aria-SelectionIndicator {
+                background: #c4fffa !important;
+                border: 0 !important;
+                border-radius: 999px !important;
+                height: 0.2rem !important;
+            }
             [data-testid="stTabs"] [role="tab"] * {
                 color: inherit !important;
                 -webkit-text-fill-color: inherit !important;
