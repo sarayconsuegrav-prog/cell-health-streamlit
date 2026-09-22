@@ -351,15 +351,28 @@ def _cloudflare_http_error_detail(
 ) -> str:
     """Extrae solo código/motivo del error y redacta cualquier valor secreto."""
     try:
-        payload = json.loads(error.read(8192).decode("utf-8", errors="replace"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return ""
+        raw_body = error.read(8192).decode("utf-8", errors="replace")
+    except OSError:
+        raw_body = ""
+    try:
+        payload = json.loads(raw_body) if raw_body else None
+    except (json.JSONDecodeError, ValueError):
+        payload = None
 
     errors = payload.get("errors", []) if isinstance(payload, dict) else []
     if isinstance(errors, dict):
         errors = [errors]
     if not isinstance(errors, list):
-        return ""
+        errors = []
+    if not errors and isinstance(payload, dict):
+        for field_name in ("error", "message", "detail", "title"):
+            value = payload.get(field_name)
+            if isinstance(value, dict):
+                errors.append({**value, "code": value.get("code", payload.get("code"))})
+            elif isinstance(value, str):
+                errors.append({"code": payload.get("code"), "message": value})
+    if not errors and raw_body:
+        errors = [{"message": raw_body}]
 
     details = []
     for item in errors[:3]:
