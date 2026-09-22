@@ -2552,6 +2552,13 @@ def main() -> None:
             .stApp { background: #061a33; color: #ffffff; }
             [data-testid="stHeader"] { background: rgba(0, 0, 0, 0); }
             [data-testid="stSidebar"] { background: #0a2745; }
+            /* El tema base reserva demasiado espacio antes y después del
+               contenido. Mantener una separación segura del encabezado, pero
+               evitar que la página termine con un vacío artificial. */
+            [data-testid="stMainBlockContainer"] {
+                padding-top: 4.5rem !important;
+                padding-bottom: 3rem !important;
+            }
             h1, h2, h3, h4, p, label, .stMarkdown, .stCaption,
             [data-testid="stMetricLabel"], [data-testid="stMetricValue"],
             [data-testid="stMetricDelta"] { color: #ffffff !important; }
@@ -3250,6 +3257,17 @@ def main() -> None:
                 line-height: 1.45;
                 margin: 3.25rem 0 0 !important;
                 padding-top: 0.25rem;
+            }
+            /* En móvil Streamlit apila las columnas, pero conserva el gap de
+               4rem usado en escritorio. Reducir solo el espacio vertical
+               evita huecos entre los campos y entre el video y sus métricas. */
+            @media (max-width: 768px) {
+                [data-testid="stHorizontalBlock"] {
+                    row-gap: 0.75rem !important;
+                }
+                [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                    min-width: 0 !important;
+                }
             }
         </style>
         """,
