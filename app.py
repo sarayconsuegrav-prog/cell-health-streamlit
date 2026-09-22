@@ -15,6 +15,7 @@ from html import escape
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -343,6 +344,47 @@ class CloudflareTurnRequestError(RuntimeError):
     """Error seguro al solicitar credenciales TURN temporales a Cloudflare."""
 
 
+def _cloudflare_http_error_detail(
+    error: HTTPError,
+    turn_key_id: str,
+    turn_key: str,
+) -> str:
+    """Extrae solo código/motivo del error y redacta cualquier valor secreto."""
+    try:
+        payload = json.loads(error.read(8192).decode("utf-8", errors="replace"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return ""
+
+    errors = payload.get("errors", []) if isinstance(payload, dict) else []
+    if isinstance(errors, dict):
+        errors = [errors]
+    if not isinstance(errors, list):
+        return ""
+
+    details = []
+    for item in errors[:3]:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        message = item.get("message")
+        safe_parts = []
+        if isinstance(code, (int, str)) and str(code).strip():
+            safe_parts.append(f"código {str(code)[:24]}")
+        if isinstance(message, str) and message.strip():
+            safe_message = message.strip()
+            for secret in (turn_key, turn_key_id):
+                if secret:
+                    safe_message = safe_message.replace(secret, "[oculto]")
+            safe_message = re.sub(r"(?i)bearer\s+\S+", "Bearer [oculto]", safe_message)
+            safe_message = re.sub(r"\b[a-fA-F0-9]{32,}\b", "[valor oculto]", safe_message)
+            safe_message = " ".join(safe_message.split())[:180]
+            if safe_message:
+                safe_parts.append(safe_message)
+        if safe_parts:
+            details.append(": ".join(safe_parts))
+    return " | ".join(details)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_cloudflare_ice_servers_cached(
     turn_key_id: str,
@@ -373,12 +415,14 @@ def _fetch_cloudflare_ice_servers_cached(
         with urllib.request.urlopen(request, timeout=10) as response:
             payload = json.load(response)
     except HTTPError as error:
+        detail = _cloudflare_http_error_detail(error, turn_key_id, turn_key)
+        suffix = f" — {detail}" if detail else ""
         if error.code in {401, 403}:
             raise CloudflareTurnRequestError(
-                f"Cloudflare rechazó la TURN key (HTTP {error.code})."
+                f"Cloudflare rechazó la solicitud TURN (HTTP {error.code}){suffix}."
             ) from error
         raise CloudflareTurnRequestError(
-            f"Cloudflare respondió con HTTP {error.code}."
+            f"Cloudflare respondió con HTTP {error.code}{suffix}."
         ) from error
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise CloudflareTurnRequestError(
