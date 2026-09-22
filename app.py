@@ -22,16 +22,28 @@ import urllib.request
 import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Callable
-from urllib.parse import quote, urlparse
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlparse
 
 import cv2
 import numpy as np
 import streamlit as st
 from ultralytics import YOLO
+
+try:
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils.cell import get_column_letter, range_boundaries
+
+    OPENPYXL_AVAILABLE = True
+    OPENPYXL_IMPORT_ERROR = ""
+except ImportError as error:
+    OPENPYXL_AVAILABLE = False
+    OPENPYXL_IMPORT_ERROR = f"{type(error).__name__}: {error}"
 
 try:
     import av
@@ -106,6 +118,8 @@ WHITE_SPOT_LABEL = "Mancha blanca (WSSV)"
 VACUOLIZATION_LABEL = "Vacuolización"
 HISTORY_LABEL = "Historial"
 HISTORY_STATE_KEY = "analysis_history"
+ONEDRIVE_SENT_BATCHES_KEY = "onedrive_sent_batches"
+EXCEL_HEADERS = ("Código", "Vacuolización", "White Spot (WSSV)")
 # OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
 # Estos son los nombres incluidos en `models/best_openvino_model/metadata.yaml`.
 DEFAULT_MODEL_NAMES = {
@@ -140,6 +154,120 @@ def runtime_setting(name: str) -> str:
     if secret_value is None:
         return environment_value
     return str(secret_value).strip() or environment_value
+
+
+class OneDriveConfigurationError(RuntimeError):
+    """Indica que falta una configuración necesaria para Microsoft Graph."""
+
+
+class OneDriveUploadError(RuntimeError):
+    """Indica que Microsoft Graph rechazó la lectura o escritura del Excel."""
+
+
+def _http_error_detail(error: HTTPError) -> str:
+    """Obtiene un detalle seguro de Graph sin incluir credenciales."""
+    try:
+        payload = error.read().decode("utf-8", errors="replace")
+    except Exception:
+        payload = ""
+    if len(payload) > 500:
+        payload = payload[:500] + "…"
+    return payload or str(error.reason or "sin detalle")
+
+
+def _get_graph_access_token() -> str:
+    """Obtiene un token de aplicación para escribir el archivo del piloto."""
+    tenant_id = runtime_setting("MS_TENANT_ID")
+    client_id = runtime_setting("MS_CLIENT_ID")
+    client_secret = runtime_setting("MS_CLIENT_SECRET")
+    if not tenant_id or not client_id or not client_secret:
+        raise OneDriveConfigurationError(
+            "Configura MS_TENANT_ID, MS_CLIENT_ID y MS_CLIENT_SECRET en "
+            "Manage app → Settings → Secrets."
+        )
+
+    token_url = f"https://login.microsoftonline.com/{quote(tenant_id, safe='')}/oauth2/v2.0/token"
+    payload = urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        token_url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            token_payload = json.load(response)
+    except HTTPError as error:
+        raise OneDriveUploadError(
+            f"Microsoft no emitió el token ({error.code}): {_http_error_detail(error)}"
+        ) from error
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise OneDriveUploadError(f"No se pudo solicitar el token de Microsoft: {error}") from error
+
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise OneDriveUploadError("Microsoft devolvió una respuesta sin access_token.")
+    return access_token
+
+
+def _graph_file_content(access_token: str, file_url: str) -> bytes | None:
+    """Descarga el Excel desde OneDrive; None significa que todavía no existe."""
+    request = urllib.request.Request(
+        file_url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except HTTPError as error:
+        if error.code == 404:
+            return None
+        raise OneDriveUploadError(
+            f"No se pudo leer el Excel de OneDrive ({error.code}): {_http_error_detail(error)}"
+        ) from error
+    except OSError as error:
+        raise OneDriveUploadError(f"No se pudo conectar con OneDrive: {error}") from error
+
+
+def _upload_graph_file(access_token: str, file_url: str, workbook_bytes: bytes) -> None:
+    """Sube el libro actualizado a la misma ruta de OneDrive."""
+    request = urllib.request.Request(
+        file_url,
+        data=workbook_bytes,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60):
+            return
+    except HTTPError as error:
+        raise OneDriveUploadError(
+            f"No se pudo guardar el Excel en OneDrive ({error.code}): {_http_error_detail(error)}"
+        ) from error
+    except OSError as error:
+        raise OneDriveUploadError(f"No se pudo subir el Excel a OneDrive: {error}") from error
+
+
+def _onedrive_file_url(user: str, file_path: str) -> str:
+    """Construye la URL de Graph para un archivo dentro del OneDrive del usuario."""
+    normalized_path = "/".join(part for part in file_path.strip("/").split("/") if part)
+    if not normalized_path:
+        raise OneDriveConfigurationError("MS_ONEDRIVE_FILE_PATH no puede estar vacío.")
+    return (
+        "https://graph.microsoft.com/v1.0/users/"
+        f"{quote(user, safe='')}/drive/root:/{quote(normalized_path, safe='/')}:/content"
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1434,6 +1562,164 @@ def sample_result_grade(
     return affected_percentage, grade, description
 
 
+def _append_rows_to_workbook(
+    workbook_bytes: bytes | None,
+    rows: list[tuple[str, str, str]],
+) -> bytes:
+    """Añade filas al libro piloto y conserva su tabla de Excel."""
+    if not OPENPYXL_AVAILABLE:
+        raise OneDriveUploadError(
+            "No está disponible openpyxl en el despliegue: "
+            f"{OPENPYXL_IMPORT_ERROR or 'dependencia ausente'}."
+        )
+
+    if workbook_bytes:
+        try:
+            workbook = load_workbook(BytesIO(workbook_bytes))
+        except Exception as error:
+            raise OneDriveUploadError(f"No se pudo abrir el libro de OneDrive: {error}") from error
+    else:
+        workbook = Workbook()
+
+    worksheet = (
+        workbook["Analisis camarones"]
+        if "Analisis camarones" in workbook.sheetnames
+        else workbook.active
+    )
+    worksheet.title = "Analisis camarones"
+
+    header_values = [str(cell.value or "").strip() for cell in worksheet[1][: len(EXCEL_HEADERS)]]
+    if not any(header_values):
+        for column_index, header in enumerate(EXCEL_HEADERS, start=1):
+            worksheet.cell(row=1, column=column_index, value=header)
+        header_values = list(EXCEL_HEADERS)
+
+    header_columns = {
+        value: index + 1
+        for index, value in enumerate(header_values)
+        if value
+    }
+    missing_headers = [header for header in EXCEL_HEADERS if header not in header_columns]
+    if missing_headers:
+        raise OneDriveUploadError(
+            "El Excel no tiene las columnas esperadas: " + ", ".join(missing_headers)
+        )
+
+    existing_rows = {
+        tuple(
+            str(worksheet.cell(row=row_number, column=header_columns[header]).value or "").strip()
+            for header in EXCEL_HEADERS
+        )
+        for row_number in range(2, worksheet.max_row + 1)
+    }
+    next_row = max(worksheet.max_row + 1, 2)
+    rows_to_append = [row_values for row_values in rows if row_values not in existing_rows]
+    for row_offset, row_values in enumerate(rows_to_append):
+        row_number = next_row + row_offset
+        worksheet.cell(row=row_number, column=header_columns[EXCEL_HEADERS[0]], value=row_values[0])
+        worksheet.cell(row=row_number, column=header_columns[EXCEL_HEADERS[1]], value=row_values[1])
+        worksheet.cell(row=row_number, column=header_columns[EXCEL_HEADERS[2]], value=row_values[2])
+        existing_rows.add(row_values)
+
+    tables = list(worksheet.tables.values())
+    if tables:
+        table = tables[0]
+        min_column, min_row, max_column, _ = range_boundaries(table.ref)
+        table.ref = (
+            f"{get_column_letter(min_column)}{min_row}:"
+            f"{get_column_letter(max_column)}{worksheet.max_row}"
+        )
+    else:
+        table = Table(
+            displayName="AnalisisCamarones",
+            ref=f"A1:{get_column_letter(len(EXCEL_HEADERS))}{worksheet.max_row}",
+        )
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+
+    output = BytesIO()
+    try:
+        workbook.save(output)
+    except Exception as error:
+        raise OneDriveUploadError(f"No se pudo preparar el Excel: {error}") from error
+    finally:
+        workbook.close()
+    return output.getvalue()
+
+
+def _live_excel_rows(
+    samples: list[dict[str, Any]],
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> list[tuple[str, str, str]]:
+    """Convierte las cuatro muestras a las tres columnas del libro corporativo."""
+    rows: list[tuple[str, str, str]] = []
+    for sample in samples:
+        _, white_spot_grade, _ = sample_result_grade(
+            sample.get("counts", {}),
+            low_limit,
+            medium_limit,
+            high_limit,
+        )
+        rows.append(
+            (
+                str(sample.get("code") or "").strip(),
+                "",
+                white_spot_grade,
+            )
+        )
+    return rows
+
+
+def send_live_samples_to_onedrive(
+    samples: list[dict[str, Any]],
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> str:
+    """Añade las muestras al Excel sincronizado en OneDrive mediante Graph."""
+    user = runtime_setting("MS_ONEDRIVE_USER")
+    file_path = runtime_setting("MS_ONEDRIVE_FILE_PATH") or "WSSV_Plantilla_Piloto.xlsx"
+    if not user:
+        raise OneDriveConfigurationError(
+            "Configura MS_ONEDRIVE_USER con el correo o ID del usuario propietario del OneDrive."
+        )
+    access_token = _get_graph_access_token()
+    file_url = _onedrive_file_url(user, file_path)
+    existing_workbook = _graph_file_content(access_token, file_url)
+    updated_workbook = _append_rows_to_workbook(
+        existing_workbook,
+        _live_excel_rows(samples, low_limit, medium_limit, high_limit),
+    )
+    _upload_graph_file(access_token, file_url, updated_workbook)
+    return file_path
+
+
+def live_excel_batch_key(
+    lot_name: str,
+    samples: list[dict[str, Any]],
+    low_limit: float,
+    medium_limit: float,
+    high_limit: float,
+) -> str:
+    """Crea una huella para no enviar dos veces el mismo lote por accidente."""
+    payload = {
+        "lot_name": lot_name.strip(),
+        "rows": _live_excel_rows(samples, low_limit, medium_limit, high_limit),
+        "recordings": [str(sample.get("recording_path") or "") for sample in samples],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def make_live_samples_report_csv(
     lot_name: str,
     samples: list[dict[str, Any]],
@@ -2185,6 +2471,50 @@ def render_live_sample_results(
             use_container_width=True,
             key="live_samples_report",
         )
+
+        excel_preview = [
+            {
+                "Código": row[0],
+                "Vacuolización": row[1],
+                "White Spot (WSSV)": row[2],
+            }
+            for row in _live_excel_rows(samples, low_limit, medium_limit, high_limit)
+        ]
+        st.dataframe(excel_preview, hide_index=True, use_container_width=True)
+        batch_key = live_excel_batch_key(
+            lot_name or "Lote sin nombre",
+            samples,
+            low_limit,
+            medium_limit,
+            high_limit,
+        )
+        sent_batches = st.session_state.get(ONEDRIVE_SENT_BATCHES_KEY, [])
+        if not isinstance(sent_batches, list):
+            sent_batches = []
+        if batch_key in sent_batches:
+            st.success("Este lote ya fue enviado al Excel de OneDrive.")
+        elif st.button(
+            "Enviar al Excel",
+            type="primary",
+            use_container_width=True,
+            key="live_send_to_onedrive",
+        ):
+            with st.spinner("Enviando las cuatro muestras a OneDrive…"):
+                try:
+                    sent_file_path = send_live_samples_to_onedrive(
+                        samples,
+                        low_limit,
+                        medium_limit,
+                        high_limit,
+                    )
+                except OneDriveConfigurationError as error:
+                    st.warning(str(error))
+                except OneDriveUploadError as error:
+                    st.error(str(error))
+                else:
+                    sent_batches.append(batch_key)
+                    st.session_state[ONEDRIVE_SENT_BATCHES_KEY] = sent_batches
+                    st.success(f"Lote enviado a OneDrive: {sent_file_path}")
     if st.button(
         "Nuevo lote / análisis",
         key="live_new_analysis",

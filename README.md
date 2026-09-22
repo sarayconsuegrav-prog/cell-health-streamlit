@@ -33,6 +33,32 @@ RTC_TURN_CREDENTIAL = "tu_credencial_turn"
 
 No publiques esas credenciales en GitHub. La cámara se inicia con **INICIAR CÁMARA** dentro del recuadro; después se habilita **Iniciar detección**.
 
+### Enviar las cuatro muestras al Excel de OneDrive
+
+Cuando se completan las cuatro muestras del lote, aparece **Enviar al Excel** y
+una vista previa con las columnas `Código`, `Vacuolización` y `White Spot
+(WSSV)`. El botón agrega las filas al libro en línea; no reemplaza las filas
+anteriores. Por ahora `Vacuolización` se envía en blanco y `White Spot (WSSV)`
+recibe el grado calculado por la detección actual.
+
+La conexión usa Microsoft Graph desde el servidor de Streamlit. Para el piloto,
+registra una aplicación en Microsoft Entra ID, concede el permiso de aplicación
+`Files.ReadWrite.All` con consentimiento administrativo y agrega estos Secrets
+en **Manage app → Settings → Secrets**:
+
+```toml
+MS_TENANT_ID = "tu-tenant-id"
+MS_CLIENT_ID = "tu-client-id"
+MS_CLIENT_SECRET = "tu-client-secret"
+MS_ONEDRIVE_USER = "usuario@empresa.com"
+MS_ONEDRIVE_FILE_PATH = "WSSV_Plantilla_Piloto.xlsx"
+```
+
+`MS_ONEDRIVE_FILE_PATH` también puede incluir carpetas dentro del OneDrive del
+usuario. El secreto nunca debe escribirse en `app.py` ni confirmarse en GitHub.
+Si falta alguna configuración, el botón seguirá visible y mostrará el dato que
+falta sin indicar que el lote fue enviado.
+
 ## Modelo
 
 El modelo revisado es de segmentación y declara estas clases:
