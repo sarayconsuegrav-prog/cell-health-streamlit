@@ -339,17 +339,22 @@ def _normalize_cloudflare_turn_value(value: str) -> str:
     return normalized
 
 
+class CloudflareTurnRequestError(RuntimeError):
+    """Error seguro al solicitar credenciales TURN temporales a Cloudflare."""
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_cloudflare_ice_servers(
+def _fetch_cloudflare_ice_servers_cached(
     turn_key_id: str,
     turn_key: str,
     ttl_seconds: int,
-) -> tuple[list[dict[str, Any]], str]:
+) -> list[dict[str, Any]]:
     """Solicita credenciales TURN efímeras de Cloudflare.
 
     La clave larga de TURN solo se usa en el servidor de Streamlit. El
     navegador recibe únicamente el conjunto de iceServers y credenciales con
-    caducidad, nunca la clave configurada en Secrets.
+    caducidad, nunca la clave configurada en Secrets. Solo se cachean respuestas
+    exitosas: los errores se elevan como excepciones y Streamlit no los cachea.
     """
     endpoint = (
         "https://rtc.live.cloudflare.com/v1/turn/keys/"
@@ -369,15 +374,42 @@ def fetch_cloudflare_ice_servers(
             payload = json.load(response)
     except HTTPError as error:
         if error.code in {401, 403}:
-            return [], f"Cloudflare rechazó la TURN key (HTTP {error.code})."
-        return [], f"Cloudflare respondió con HTTP {error.code}."
+            raise CloudflareTurnRequestError(
+                f"Cloudflare rechazó la TURN key (HTTP {error.code})."
+            ) from error
+        raise CloudflareTurnRequestError(
+            f"Cloudflare respondió con HTTP {error.code}."
+        ) from error
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-        return [], f"No se pudo consultar Cloudflare ({type(error).__name__})."
+        raise CloudflareTurnRequestError(
+            f"No se pudo consultar Cloudflare ({type(error).__name__})."
+        ) from error
 
     servers = _filter_cloudflare_ice_servers(payload)
     if not servers:
-        return [], "Cloudflare respondió sin servidores ICE utilizables."
-    return servers, ""
+        raise CloudflareTurnRequestError(
+            "Cloudflare respondió sin servidores ICE utilizables."
+        )
+    return servers
+
+
+def fetch_cloudflare_ice_servers(
+    turn_key_id: str,
+    turn_key: str,
+    ttl_seconds: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Devuelve servidores ICE o un error sin cachear las respuestas fallidas."""
+    try:
+        return (
+            _fetch_cloudflare_ice_servers_cached(
+                turn_key_id,
+                turn_key,
+                ttl_seconds,
+            ),
+            "",
+        )
+    except CloudflareTurnRequestError as error:
+        return [], str(error)
 
 
 def normalize_metered_app_name(value: str) -> str:
