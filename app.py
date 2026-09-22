@@ -746,6 +746,23 @@ class LiveSessionState:
             self.pending_sample = None
             self.sample_ready = False
 
+    def discard_pending_sample(self) -> None:
+        """Descarta la captura detenida y elimina su video temporal."""
+        with self.lock:
+            pending_path = ""
+            if self.pending_sample:
+                pending_path = str(self.pending_sample.get("recording_path") or "").strip()
+
+        # reset_metrics elimina el archivo que todavía está asociado al estado;
+        # el segundo borrado cubre el caso en que Streamlit haya reconstruido el
+        # estado desde `live_pending_sample` después de un rerun.
+        self.reset_metrics()
+        if pending_path:
+            try:
+                Path(pending_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _freeze_current_sample_locked(self) -> None:
         """Congela el resultado al detener para que el guardado no dependa del callback."""
         if self.captured_frames <= 0:
@@ -928,6 +945,7 @@ def get_live_session_state() -> LiveSessionState:
             "snapshot",
             "set_detection_active",
             "reset_metrics",
+            "discard_pending_sample",
             "save_current_sample",
             "completed_samples_snapshot",
         )
@@ -2061,12 +2079,6 @@ def render_live_metrics_panel(
                 f"{snapshot['processed_frames']:,} inferidos"
             )
 
-        if detection_requested and snapshot["camera_frames"] == 0:
-            st.warning(
-                "La cámara todavía no entrega fotogramas. Autoriza el acceso en el navegador "
-                "y pulsa Iniciar cámara fuera del recuadro de video."
-            )
-
         if snapshot["model_loading"]:
             st.caption("Preparando el modelo… el video continúa grabándose.")
 
@@ -2595,11 +2607,6 @@ def render_live_camera(
                 "video_receiver_size": 1,
                 "sendback_video": True,
                 "sendback_audio": False,
-                "translations": {
-                    "device_ask_permission": "Autoriza el acceso a la cámara para comenzar.",
-                    "device_not_available": "No se encontró una cámara disponible.",
-                    "device_access_denied": "Se denegó el acceso a la cámara.",
-                },
             }
             camera_context = webrtc_streamer(**webrtc_options)
             camera_state = getattr(camera_context, "state", None)
@@ -2608,27 +2615,10 @@ def render_live_camera(
             st.session_state["live_camera_playing"] = camera_playing
             if camera_playing:
                 st.session_state.pop("live_camera_start_required", None)
-            else:
-                st.info("Conectando cámara… si Chrome solicita permiso, selecciona Permitir.")
         else:
             st.session_state["live_camera_playing"] = False
-            if st.session_state.pop("live_camera_start_required", False):
-                st.warning("Pulsa **Iniciar cámara** para mostrar el video.")
-            else:
-                st.caption("Pulsa **Iniciar cámara** para mostrar el video.")
 
         camera_snapshot = state.snapshot()
-        if camera_playing and camera_snapshot["camera_frames"] == 0:
-            st.warning(
-                "La cámara está encendida, pero todavía no llegan fotogramas. "
-                "Si permanece en blanco durante varios segundos, permite la cámara "
-                "en Chrome y verifica TURN en Manage app → Settings → Secrets."
-            )
-        if ice_state.lower() in {"failed", "disconnected", "closed"}:
-            st.warning(
-                "El navegador no pudo conectar el video. Revisa el permiso de cámara o "
-                "prueba otra red; algunas redes requieren un servidor TURN."
-            )
         with status_column:
             render_live_metrics_panel(
                 state,
@@ -2690,6 +2680,21 @@ def render_live_camera(
                 st.rerun()
             else:
                 st.warning("No hay una captura detenida lista para guardar.")
+
+        if snapshot_after_action["sample_ready"] and not detection_is_active:
+            if st.button(
+                "Borrar muestra",
+                key="live_sample_discard",
+                use_container_width=True,
+            ):
+                state.set_detection_active(False)
+                state.discard_pending_sample()
+                st.session_state["live_detection_requested"] = False
+                st.session_state.pop("live_pending_sample", None)
+                st.session_state["live_save_feedback"] = (
+                    "Muestra descartada. Puedes iniciar una nueva detección."
+                )
+                st.rerun()
 
     render_live_sample_results(
         state,
