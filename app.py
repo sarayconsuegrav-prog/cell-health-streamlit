@@ -304,8 +304,17 @@ def normalize_metered_app_name(value: str) -> str:
 
 
 def rtc_configuration() -> dict[str, Any]:
-    """Construye ICE servers y añade TURN solo cuando el despliegue lo configura."""
+    """Construye ICE servers; TURN requiere una activación explícita."""
     ice_servers = [dict(server) for server in DEFAULT_ICE_SERVERS]
+    turn_enabled = runtime_setting("RTC_ENABLE_TURN").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not turn_enabled:
+        return {"iceServers": ice_servers}
+
     raw_ice_servers = runtime_setting("RTC_ICE_SERVERS_JSON")
     if raw_ice_servers:
         try:

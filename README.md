@@ -14,7 +14,15 @@ También hace seguimiento de objetos para que el número final sea de células �
 
 ### Cámara en Streamlit Cloud
 
-La cámara en vivo usa WebRTC. La aplicación incluye servidores STUN públicos y acepta un servidor TURN opcional mediante Secrets de Streamlit. Si el navegador muestra **“Connection is taking longer than expected”** y el video queda en blanco, crea credenciales TURN en un proveedor como Metered o Twilio y agrega estos Secrets en **Manage app → Settings → Secrets**:
+La cámara en vivo usa WebRTC y, por ahora, funciona solamente con los
+servidores STUN públicos incluidos en la aplicación. TURN está desactivado por
+defecto, aunque existan Secrets de Metered o TURN en Streamlit. Si más adelante
+necesitas activarlo por problemas de red, agrega `RTC_ENABLE_TURN = "true"` en
+**Manage app → Settings → Secrets** y configura uno de los bloques siguientes.
+
+Si el navegador muestra **“Connection is taking longer than expected”** y el
+video queda en blanco, crea credenciales TURN en un proveedor como Metered o
+Twilio y agrega estos Secrets en **Manage app → Settings → Secrets**:
 
 Con Metered OpenRelay puedes guardar el nombre de tu aplicación y la API key; la app solicitará automáticamente las credenciales TURN temporales:
 
@@ -31,7 +39,8 @@ RTC_TURN_USERNAME = "tu_usuario_turn"
 RTC_TURN_CREDENTIAL = "tu_credencial_turn"
 ```
 
-No publiques esas credenciales en GitHub. La cámara se inicia con **INICIAR CÁMARA** dentro del recuadro; después se habilita **Iniciar detección**.
+No publiques esas credenciales en GitHub. La cámara se inicia con **INICIAR
+CÁMARA** dentro del recuadro; después se habilita **Iniciar detección**.
 
 ### Enviar las cuatro muestras al Excel de OneDrive
 
