@@ -1845,7 +1845,12 @@ def render_analysis_history() -> None:
                             unsafe_allow_html=True,
                         )
                     elif st.session_state.get("history_playing_video") == history_id:
-                        st.video(str(video_path), format="video/mp4")
+                        st.video(
+                            str(video_path),
+                            format="video/mp4",
+                            autoplay=True,
+                            muted=True,
+                        )
                     else:
                         try:
                             modified_ns = video_path.stat().st_mtime_ns
