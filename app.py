@@ -421,6 +421,9 @@ def _fetch_cloudflare_ice_servers_cached(
         headers={
             "Authorization": f"Bearer {turn_key.strip()}",
             "Content-Type": "application/json",
+            # El endpoint devuelve 403/1010 al User-Agent predeterminado de
+            # urllib; el mismo POST sí se acepta con cURL desde la terminal.
+            "User-Agent": "curl/8.7.1",
         },
         method="POST",
     )
