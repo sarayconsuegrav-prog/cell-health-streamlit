@@ -23,6 +23,7 @@ import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
+from fractions import Fraction
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Callable
@@ -118,6 +119,7 @@ WHITE_SPOT_LABEL = "Mancha blanca (WSSV)"
 VACUOLIZATION_LABEL = "Vacuolización"
 HISTORY_LABEL = "Historial"
 HISTORY_STATE_KEY = "analysis_history"
+HISTORY_VIDEO_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "history_videos"
 ONEDRIVE_SENT_BATCHES_KEY = "onedrive_sent_batches"
 EXCEL_HEADERS = ("Código", "Vacuolización", "White Spot (WSSV)")
 # OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
@@ -1122,6 +1124,147 @@ def get_analysis_history() -> list[dict[str, Any]]:
     return history
 
 
+def _video_path_is_ready(path: str | Path) -> bool:
+    """Indica si una ruta apunta a un video que ya terminó de escribirse."""
+    try:
+        video_path = Path(path)
+        return video_path.is_file() and video_path.stat().st_size > 0
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _transcode_video_for_browser(source_path: Path, destination_path: Path) -> bool:
+    """Convierte el MP4 temporal a H.264 para que el reproductor HTML5 lo abra."""
+    try:
+        import av
+    except ImportError:
+        return False
+
+    input_container = None
+    output_container = None
+    success = False
+    try:
+        input_container = av.open(str(source_path))
+        input_stream = next(
+            (stream for stream in input_container.streams if stream.type == "video"),
+            None,
+        )
+        if input_stream is None:
+            return False
+
+        width = int(input_stream.codec_context.width or 0)
+        height = int(input_stream.codec_context.height or 0)
+        if width <= 0 or height <= 0:
+            return False
+        # yuv420p requiere dimensiones pares y el video de la cámara normalmente
+        # ya las tiene. El ajuste también cubre cámaras con dimensiones impares.
+        width -= width % 2
+        height -= height % 2
+        if width <= 0 or height <= 0:
+            return False
+
+        source_rate = input_stream.average_rate or input_stream.base_rate or 15
+        frame_rate = max(1, min(60, round(float(source_rate))))
+        output_container = av.open(str(destination_path), mode="w", format="mp4")
+        output_stream = None
+        for codec_name in ("libx264", "h264", "mpeg4"):
+            try:
+                output_stream = output_container.add_stream(codec_name, rate=frame_rate)
+                break
+            except Exception:
+                output_stream = None
+        if output_stream is None:
+            return False
+
+        output_stream.width = width
+        output_stream.height = height
+        output_stream.pix_fmt = "yuv420p"
+        frame_number = 0
+        for packet in input_container.demux(input_stream):
+            for frame in packet.decode():
+                converted = frame.reformat(
+                    format="yuv420p",
+                    width=width,
+                    height=height,
+                )
+                converted.pts = frame_number
+                converted.time_base = Fraction(1, frame_rate)
+                for encoded_packet in output_stream.encode(converted):
+                    output_container.mux(encoded_packet)
+                frame_number += 1
+
+        for encoded_packet in output_stream.encode():
+            output_container.mux(encoded_packet)
+        success = frame_number > 0
+        return success
+    except Exception:
+        return False
+    finally:
+        if input_container is not None:
+            try:
+                input_container.close()
+            except Exception:
+                pass
+        if output_container is not None:
+            try:
+                output_container.close()
+            except Exception:
+                pass
+        if not success:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def persist_history_video(source_path: str | Path, history_id: str) -> str:
+    """Copia un video guardado a una ruta estable y apta para reproducirse."""
+    source = Path(source_path) if str(source_path).strip() else Path()
+    if not _video_path_is_ready(source):
+        return str(source_path or "")
+
+    try:
+        HISTORY_VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+        video_key = hashlib.sha256(history_id.encode("utf-8")).hexdigest()[:24]
+        destination = HISTORY_VIDEO_ROOT / f"{video_key}.mp4"
+        if _video_path_is_ready(destination):
+            return str(destination)
+
+        if not _transcode_video_for_browser(source, destination):
+            shutil.copy2(source, destination)
+        return str(destination) if _video_path_is_ready(destination) else str(source)
+    except OSError:
+        return str(source)
+
+
+def history_video_path(record: dict[str, Any]) -> Path:
+    """Obtiene el video del historial y migra registros antiguos si aún existen."""
+    recording_value = str(record.get("recording_path") or "").strip()
+    source_value = str(record.get("source_recording_path") or "").strip()
+    recording_path = Path(recording_value) if recording_value else Path()
+    source_path = Path(source_value) if source_value else recording_path
+    history_id = str(record.get("history_id") or "history-video")
+
+    if _video_path_is_ready(recording_path):
+        # Los registros creados antes de esta mejora apuntan directamente al
+        # archivo temporal. Se copian una sola vez a la carpeta del historial.
+        if recording_path.parent != HISTORY_VIDEO_ROOT:
+            stable_path = persist_history_video(recording_path, history_id)
+            if stable_path and stable_path != recording_value:
+                record["source_recording_path"] = recording_value
+                record["recording_path"] = stable_path
+                return Path(stable_path)
+        return recording_path
+
+    if _video_path_is_ready(source_path):
+        stable_path = persist_history_video(source_path, history_id)
+        if stable_path:
+            record["source_recording_path"] = str(source_path)
+            record["recording_path"] = stable_path
+            return Path(stable_path)
+    return recording_path
+
+
 def add_live_sample_to_history(
     sample: dict[str, Any],
     low_limit: float = 10.0,
@@ -1130,11 +1273,11 @@ def add_live_sample_to_history(
 ) -> None:
     """Registra una muestra guardada para consultarla desde Historial.
 
-    El video se conserva como una ruta temporal para no duplicarlo en la memoria
-    de Streamlit. La persistencia duradera se conectará después con Microsoft.
+    El video se copia a disco, no a la RAM, y queda en una ruta estable durante
+    la sesión para que el reproductor pueda abrirlo después de cada rerun.
     """
     history = get_analysis_history()
-    recording_path = str(sample.get("recording_path") or "").strip()
+    source_recording_path = str(sample.get("recording_path") or "").strip()
     sample_number = int(sample.get("sample_number", 0) or 0)
     lot_name = str(sample.get("lot_name") or "Lote sin nombre").strip()
     code = str(sample.get("code") or f"Muestra-{sample_number}").strip()
@@ -1143,7 +1286,10 @@ def add_live_sample_to_history(
             record
             for record in history
             if record.get("analysis_type") == WHITE_SPOT_LABEL
-            and record.get("recording_path") == recording_path
+            and (
+                record.get("source_recording_path") == source_recording_path
+                or record.get("recording_path") == source_recording_path
+            )
             and record.get("sample_number") == sample_number
             and record.get("lot_name") == lot_name
         ),
@@ -1156,6 +1302,12 @@ def add_live_sample_to_history(
         high_limit,
     )
     if existing is not None:
+        if source_recording_path:
+            existing["recording_path"] = persist_history_video(
+                source_recording_path,
+                str(existing.get("history_id") or "history-video"),
+            )
+            existing["source_recording_path"] = source_recording_path
         existing.update(
             {
                 "sample_code": code,
@@ -1166,9 +1318,11 @@ def add_live_sample_to_history(
         )
         return
 
+    history_id = f"wssv-{len(history) + 1}-{time.time_ns()}"
+    recording_path = persist_history_video(source_recording_path, history_id)
     history.append(
         {
-            "history_id": f"wssv-{len(history) + 1}-{time.time_ns()}",
+            "history_id": history_id,
             "analysis_type": WHITE_SPOT_LABEL,
             "model_label": WHITE_SPOT_LABEL,
             "sample_number": sample_number,
@@ -1184,6 +1338,7 @@ def add_live_sample_to_history(
             if sample.get("measurements")
             else None,
             "recording_path": recording_path,
+            "source_recording_path": source_recording_path,
         }
     )
 
@@ -1197,7 +1352,10 @@ def sync_history_sample_codes(samples: list[dict[str, Any]]) -> None:
                 record.get("analysis_type") == WHITE_SPOT_LABEL
                 and record.get("sample_number") == sample.get("sample_number")
                 and record.get("lot_name") == sample.get("lot_name")
-                and record.get("recording_path") == str(sample.get("recording_path") or "")
+                and (
+                    record.get("source_recording_path") == str(sample.get("recording_path") or "")
+                    or record.get("recording_path") == str(sample.get("recording_path") or "")
+                )
             ):
                 record["sample_code"] = str(sample.get("code") or "").strip()
 
@@ -1228,9 +1386,9 @@ def render_analysis_history() -> None:
         unsafe_allow_html=True,
     )
     for record in records:
-        recording_path = str(record.get("recording_path") or "").strip()
-        video_available = bool(recording_path and Path(recording_path).is_file())
-        video_state = "Video disponible" if video_available else "Video no disponible en esta sesión"
+        video_path = history_video_path(record)
+        video_available = _video_path_is_ready(video_path)
+        video_state = "Reproducible" if video_available else "No disponible"
         st.markdown(
             f"""
             <article class="history-card">
@@ -1252,11 +1410,10 @@ def render_analysis_history() -> None:
             unsafe_allow_html=True,
         )
         if video_available:
-            st.video(recording_path)
+            st.video(str(video_path), format="video/mp4")
         else:
             st.caption(
-                "El registro y sus datos permanecen en el historial de esta sesión; "
-                "el almacenamiento permanente del video se conectará con Microsoft."
+                "La fecha y el grado permanecen guardados, pero este registro no tiene un video disponible."
             )
 
 
