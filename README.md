@@ -14,11 +14,10 @@ También hace seguimiento de objetos para que el número final sea de células �
 
 ### Cámara en Streamlit Cloud
 
-La cámara en vivo usa WebRTC y, por ahora, funciona solamente con los
-servidores STUN públicos incluidos en la aplicación. TURN está desactivado por
-defecto, aunque existan Secrets de Metered o TURN en Streamlit. Si más adelante
-necesitas activarlo por problemas de red, agrega `RTC_ENABLE_TURN = "true"` en
-**Manage app → Settings → Secrets** y configura uno de los bloques siguientes.
+La cámara en vivo usa WebRTC. TURN queda activo cuando existen credenciales
+configuradas, porque Streamlit Cloud puede necesitar un retransmisor para
+entregar el video a otra computadora. Para desactivarlo explícitamente agrega
+`RTC_ENABLE_TURN = "false"` en **Manage app → Settings → Secrets**.
 
 Si el navegador muestra **“Connection is taking longer than expected”** y el
 video queda en blanco, crea credenciales TURN en un proveedor como Metered o
