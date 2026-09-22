@@ -1021,6 +1021,7 @@ class LiveSessionState:
     recording_size: tuple[int, int] | None = None
     recorded_frames: int = 0
     track_votes: dict[int, Counter] = field(default_factory=lambda: defaultdict(Counter))
+    measurement_track_ids: set[int] = field(default_factory=set)
     measurement_samples: dict[str, dict[str, list[float]]] = field(default_factory=new_measurement_samples)
     calibration: dict[str, Any] | None = None
     cached_shape: tuple[int, ...] | None = None
@@ -1094,6 +1095,7 @@ class LiveSessionState:
             self.processed_frames = 0
             self.recorded_frames = 0
             self.track_votes = defaultdict(Counter)
+            self.measurement_track_ids = set()
             self.measurement_samples = new_measurement_samples()
             self.calibration = None
             self.cached_shape = None
@@ -1209,6 +1211,7 @@ class LiveSessionState:
             self.processed_frames = 0
             self.recorded_frames = 0
             self.track_votes = defaultdict(Counter)
+            self.measurement_track_ids = set()
             self.measurement_samples = new_measurement_samples()
             self.calibration = None
             self.cached_shape = None
@@ -1323,6 +1326,10 @@ def get_live_session_state() -> LiveSessionState:
             state.processed_frames = int(pending_sample.get("processed_frames", 0))
             state.recorded_frames = int(pending_sample.get("recorded_frames", 0))
         st.session_state["live_session_state"] = state
+    if not hasattr(state, "measurement_track_ids"):
+        # Compatibilidad con una sesión creada antes de incorporar el
+        # acumulado de métricas por ID de célula.
+        state.measurement_track_ids = set()
     return state
 
 
@@ -1726,23 +1733,67 @@ def remember_pool(name: str) -> str:
 
 
 def collect_measurement_samples(
-    result: Any, model_names: dict[int, str], samples: dict[str, dict[str, list[float]]]
+    result: Any,
+    model_names: dict[int, str],
+    samples: dict[str, dict[str, list[float]]],
+    seen_track_ids: set[int] | None = None,
 ) -> None:
-    """Añade las métricas de cada máscara sana o enferma al acumulador."""
+    """Añade métricas sin duplicar una célula rastreada durante la placa."""
     if result.masks is None or result.boxes is None:
         return
     class_ids = result.boxes.cls.int().cpu().tolist()
+    track_ids: list[int | None] = [None] * len(class_ids)
+    if result.boxes.id is not None:
+        tracked_ids = result.boxes.id.int().cpu().tolist()
+        track_ids = [int(track_id) for track_id in tracked_ids]
 
-    for polygon, class_id in zip(result.masks.xy, class_ids):
+    original_image = getattr(result, "orig_img", None)
+    if original_image is not None:
+        frame_shape = np.asarray(original_image).shape
+    else:
+        mask_shape = getattr(result.masks, "orig_shape", None)
+        frame_shape = (*mask_shape, 3) if mask_shape else None
+    raster_masks = (
+        _mask_data_at_frame_size(result, frame_shape)
+        if frame_shape is not None
+        else None
+    )
+
+    if raster_masks is not None and len(raster_masks) == len(class_ids):
+        observations = (
+            (index, class_id, mask, None)
+            for index, (class_id, mask) in enumerate(zip(class_ids, raster_masks))
+        )
+    else:
+        observations = (
+            (index, class_id, None, polygon)
+            for index, (polygon, class_id) in enumerate(zip(result.masks.xy, class_ids))
+        )
+
+    for index, class_id, raster_mask, polygon in observations:
+        track_id = track_ids[index] if index < len(track_ids) else None
+        if seen_track_ids is not None and track_id is not None and track_id in seen_track_ids:
+            continue
         class_name = model_names.get(int(class_id), str(class_id))
         category = normalize_class_name(class_name)
         if category not in {"sana", "enferma"}:
             continue
-        contour = np.asarray(polygon, dtype=np.float32)
-        if contour.shape[0] < 3:
-            continue
-        area_px2 = float(cv2.contourArea(contour))
-        if area_px2 <= 0:
+        if raster_mask is not None:
+            binary_mask = np.asarray(raster_mask, dtype=np.uint8)
+            area_px2 = float(np.count_nonzero(binary_mask))
+            contours, _ = cv2.findContours(
+                binary_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            perimeter_px = sum(float(cv2.arcLength(contour, True)) for contour in contours)
+        else:
+            contour = np.asarray(polygon, dtype=np.float32)
+            if contour.shape[0] < 3:
+                continue
+            area_px2 = float(cv2.contourArea(contour))
+            perimeter_px = float(cv2.arcLength(contour, True))
+        if area_px2 <= 0 or perimeter_px <= 0:
             continue
         area_values = samples["areas_px2"][category]
         perimeter_values = samples["perimeters_px"][category]
@@ -1750,8 +1801,10 @@ def collect_measurement_samples(
         if len(area_values) >= MAX_MEASUREMENT_OBSERVATIONS:
             continue
         area_values.append(area_px2)
-        perimeter_values.append(float(cv2.arcLength(contour, True)))
+        perimeter_values.append(perimeter_px)
         diameter_values.append(math.sqrt(4.0 * area_px2 / math.pi))
+        if seen_track_ids is not None and track_id is not None:
+            seen_track_ids.add(track_id)
 
 
 def summarize_measurement_samples(
@@ -2335,6 +2388,7 @@ def process_video(
         processed_frames = 0
         last_preview_update = 0.0
         video_measurement_samples = new_measurement_samples()
+        video_measurement_track_ids: set[int] = set()
         video_calibration: dict[str, Any] | None = None
 
         results = model.track(
@@ -2351,7 +2405,12 @@ def process_video(
         for result in results:
             if video_calibration is None:
                 video_calibration = calibration_from_image(result.orig_img)
-            collect_measurement_samples(result, model_names, video_measurement_samples)
+            collect_measurement_samples(
+                result,
+                model_names,
+                video_measurement_samples,
+                video_measurement_track_ids,
+            )
             masks_frame = mask_frame(result, result.orig_img.shape, model_names)
             output_frame = (
                 overlay_masks(result.orig_img, masks_frame, mask_opacity)
@@ -3064,6 +3123,7 @@ def render_live_camera(
             return
 
         state.reset_metrics()
+        state.measurement_track_ids = set()
         st.session_state.pop("live_pending_sample", None)
         with state.lock:
             active_model = state.inference_model
@@ -3152,7 +3212,12 @@ def render_live_camera(
                 if state.calibration is None:
                     state.calibration = calibration_from_image(image)
                 update_track_votes(result, state.track_votes, model_names)
-                collect_measurement_samples(result, model_names, state.measurement_samples)
+                collect_measurement_samples(
+                    result,
+                    model_names,
+                    state.measurement_samples,
+                    state.measurement_track_ids,
+                )
                 state.processed_frames += 1
                 state.last_error = ""
                 state.inference_retry_at = 0.0
