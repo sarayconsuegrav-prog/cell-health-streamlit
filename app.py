@@ -455,8 +455,9 @@ def rtc_configuration() -> dict[str, Any]:
             if cloudflare_servers:
                 ice_servers.extend(cloudflare_servers)
             else:
+                detail = cloudflare_error or "respuesta vacía"
                 st.warning(
-                    f"Cloudflare TURN no está disponible ({cloudflare_error or 'respuesta vacía'}). "
+                    f"Cloudflare TURN no está disponible: {detail} "
                     "Se intentará la conexión directa; revisa "
                     "CLOUDFLARE_TURN_KEY_ID y CLOUDFLARE_TURN_KEY."
                 )
