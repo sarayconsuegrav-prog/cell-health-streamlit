@@ -3516,10 +3516,10 @@ def main() -> None:
             }
             /* La primera navegación adopta el patrón de barra superior de una
                aplicación: clara, horizontal y con un activo muy visible. */
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) {
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) {
                 margin: 0 0 1.25rem !important;
             }
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] {
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] {
                 justify-content: center !important;
                 gap: 0.15rem !important;
                 padding: 0.3rem 0.45rem !important;
@@ -3528,7 +3528,7 @@ def main() -> None:
                 border-radius: 12px !important;
                 box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12) !important;
             }
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"] {
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"] {
                 min-height: 2.35rem !important;
                 padding: 0.54rem 0.95rem !important;
                 background: transparent !important;
@@ -3538,16 +3538,16 @@ def main() -> None:
                 -webkit-text-fill-color: #43556a !important;
                 font-size: 0.84rem !important;
             }
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:hover,
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:focus-visible,
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"][aria-selected="true"] {
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:hover,
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:focus-visible,
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"][aria-selected="true"] {
                 background: #dff6f3 !important;
                 border-color: #b3e6e1 !important;
                 color: #075d68 !important;
                 -webkit-text-fill-color: #075d68 !important;
                 box-shadow: none !important;
             }
-            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] .react-aria-SelectionIndicator {
+            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] .react-aria-SelectionIndicator {
                 background: #0f7c86 !important;
                 height: 0.18rem !important;
             }
