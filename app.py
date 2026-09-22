@@ -908,8 +908,6 @@ class LiveSessionState:
 
     lock: Lock = field(default_factory=Lock)
     detection_active: bool = False
-    show_healthy_masks: bool = True
-    show_sick_masks: bool = True
     frame_number: int = 0
     camera_frames: int = 0
     captured_frames: int = 0
@@ -2920,20 +2918,6 @@ def render_live_camera(
     )
     resolution = LIVE_RESOLUTIONS[resolution_label]
 
-    visible_masks = st.pills(
-        "Controles de máscaras",
-        ["Sanas", "Enfermas"],
-        selection_mode="multi",
-        default=["Sanas", "Enfermas"],
-        key="live_visible_masks",
-        label_visibility="collapsed",
-    )
-    show_healthy_masks = "Sanas" in visible_masks
-    show_sick_masks = "Enfermas" in visible_masks
-    with state.lock:
-        state.show_healthy_masks = show_healthy_masks
-        state.show_sick_masks = show_sick_masks
-
     # Los tres controles viven fuera del video. Se usan las columnas directamente
     # en lugar de `st.empty()`: los placeholders podían conservar un contenedor
     # vacío después de un rerun de WebRTC y aparentar un segundo control blanco.
@@ -3106,8 +3090,6 @@ def render_live_camera(
                 inference_busy = state.inference_busy
                 active_model_available = state.inference_model is not None
                 inference_generation = state.inference_generation
-                show_healthy = state.show_healthy_masks
-                show_sick = state.show_sick_masks
                 inference_retry_at = state.inference_retry_at
 
             if not detection_active:
@@ -3147,13 +3129,12 @@ def render_live_camera(
                             daemon=True,
                         ).start()
 
+            # En la cámara en vivo siempre se muestran las dos clases. Los
+            # filtros de máscaras pertenecen únicamente al análisis de fotos.
             mask_layers = [
                 cached_mask
-                for enabled, cached_mask in (
-                    (show_healthy, cached_healthy_masks),
-                    (show_sick, cached_sick_masks),
-                )
-                if enabled and cached_mask is not None
+                for cached_mask in (cached_healthy_masks, cached_sick_masks)
+                if cached_mask is not None
             ]
             if not mask_layers:
                 output = image
