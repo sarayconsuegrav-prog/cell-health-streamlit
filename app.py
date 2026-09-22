@@ -4600,7 +4600,7 @@ def main() -> None:
             [class*="st-key-history_preview_"] [data-testid="stImage"] {
                 margin: 0 !important;
             }
-            [class*="st-key-history_preview_"] [data-testid="stButton"] {
+            [class*="st-key-history_preview_"] [class*="st-key-history_play_"] {
                 position: absolute !important;
                 inset: 0 !important;
                 z-index: 3;
@@ -4609,9 +4609,8 @@ def main() -> None:
                 justify-content: center;
                 width: 100% !important;
                 height: 100% !important;
-                pointer-events: none;
             }
-            [class*="st-key-history_preview_"] [data-testid="stButton"] button {
+            [class*="st-key-history_preview_"] [class*="st-key-history_play_"] button {
                 width: 2.65rem !important;
                 min-width: 2.65rem !important;
                 height: 2.65rem !important;
