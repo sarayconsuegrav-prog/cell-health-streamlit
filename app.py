@@ -329,12 +329,22 @@ def _filter_cloudflare_ice_servers(payload: Any) -> list[dict[str, Any]]:
     return servers
 
 
+def _normalize_cloudflare_turn_value(value: str) -> str:
+    """Limpia valores copiados desde Cloudflare sin alterar el secreto real."""
+    normalized = str(value or "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
+        normalized = normalized[1:-1].strip()
+    if normalized.lower().startswith("bearer "):
+        normalized = normalized[7:].strip()
+    return normalized
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_cloudflare_ice_servers(
     turn_key_id: str,
     turn_key: str,
     ttl_seconds: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Solicita credenciales TURN efímeras de Cloudflare.
 
     La clave larga de TURN solo se usa en el servidor de Streamlit. El
@@ -357,9 +367,17 @@ def fetch_cloudflare_ice_servers(
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             payload = json.load(response)
-    except (HTTPError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return []
-    return _filter_cloudflare_ice_servers(payload)
+    except HTTPError as error:
+        if error.code in {401, 403}:
+            return [], f"Cloudflare rechazó la TURN key (HTTP {error.code})."
+        return [], f"Cloudflare respondió con HTTP {error.code}."
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        return [], f"No se pudo consultar Cloudflare ({type(error).__name__})."
+
+    servers = _filter_cloudflare_ice_servers(payload)
+    if not servers:
+        return [], "Cloudflare respondió sin servidores ICE utilizables."
+    return servers, ""
 
 
 def normalize_metered_app_name(value: str) -> str:
@@ -406,11 +424,15 @@ def rtc_configuration() -> dict[str, Any]:
         return {"iceServers": ice_servers}
 
     if turn_provider in {"cloudflare", "cf"}:
-        turn_key_id = runtime_setting("CLOUDFLARE_TURN_KEY_ID")
+        turn_key_id = _normalize_cloudflare_turn_value(
+            runtime_setting("CLOUDFLARE_TURN_KEY_ID")
+        )
         # Se admite el alias API_TOKEN para facilitar la migración, aunque el
         # valor debe ser la clave larga emitida al crear la TURN key.
-        turn_key = runtime_setting("CLOUDFLARE_TURN_KEY") or runtime_setting(
-            "CLOUDFLARE_TURN_API_TOKEN"
+        turn_key = _normalize_cloudflare_turn_value(
+            runtime_setting("CLOUDFLARE_TURN_KEY") or runtime_setting(
+                "CLOUDFLARE_TURN_API_TOKEN"
+            )
         )
         ttl_raw = runtime_setting("CLOUDFLARE_TURN_TTL_SECONDS") or "86400"
         try:
@@ -419,18 +441,24 @@ def rtc_configuration() -> dict[str, Any]:
             ttl_seconds = 86400
 
         if turn_key_id and turn_key:
-            cloudflare_servers = fetch_cloudflare_ice_servers(
-                turn_key_id,
-                turn_key,
-                ttl_seconds,
-            )
+            if len(turn_key_id) != 32 or len(turn_key) != 64:
+                cloudflare_servers, cloudflare_error = [], (
+                    "formato inválido: el Key ID debe tener 32 caracteres y "
+                    "la clave larga debe tener 64"
+                )
+            else:
+                cloudflare_servers, cloudflare_error = fetch_cloudflare_ice_servers(
+                    turn_key_id,
+                    turn_key,
+                    ttl_seconds,
+                )
             if cloudflare_servers:
                 ice_servers.extend(cloudflare_servers)
             else:
                 st.warning(
-                    "Cloudflare no devolvió credenciales TURN. Se intentará la "
-                    "conexión directa; revisa CLOUDFLARE_TURN_KEY_ID y "
-                    "CLOUDFLARE_TURN_KEY."
+                    f"Cloudflare TURN no está disponible ({cloudflare_error or 'respuesta vacía'}). "
+                    "Se intentará la conexión directa; revisa "
+                    "CLOUDFLARE_TURN_KEY_ID y CLOUDFLARE_TURN_KEY."
                 )
         elif runtime_setting("METERED_APP_NAME") or runtime_setting("METERED_API_KEY"):
             st.info(
