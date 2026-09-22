@@ -3351,13 +3351,14 @@ def main() -> None:
                 grid-template-columns: minmax(0, 1.45fr) minmax(12rem, 0.55fr);
                 align-items: stretch;
                 gap: 1rem;
-                margin: 0 0 1.15rem;
-                padding: 1.2rem 1.35rem 1.25rem;
-                overflow: hidden;
-                background: #0a2745;
-                border: 1px solid #2c8396;
-                border-radius: 18px;
-                box-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
+                margin: 0 0 0.9rem;
+                padding: 0.95rem 0.25rem 1.25rem;
+                overflow: visible;
+                background: transparent;
+                border: 0;
+                border-bottom: 1px solid rgba(107, 191, 209, 0.3);
+                border-radius: 0;
+                box-shadow: none;
             }
             .app-header-copy { position: relative; z-index: 1; }
             .app-header-side {
@@ -3365,21 +3366,22 @@ def main() -> None:
                 display: flex;
                 flex-direction: column;
                 justify-content: center;
-                min-height: 9rem;
-                padding: 0.9rem 1rem;
-                background: #103858;
-                border: 1px solid rgba(107, 191, 209, 0.48);
-                border-radius: 13px;
+                min-height: 6.5rem;
+                padding: 0.5rem 0 0.5rem 1.25rem;
+                background: transparent;
+                border: 0;
+                border-left: 1px solid rgba(107, 191, 209, 0.4);
+                border-radius: 0;
                 overflow: hidden;
             }
             .app-header-side::after {
                 content: "";
                 position: absolute;
-                inset: 0;
-                background-image: linear-gradient(rgba(166, 245, 240, 0.08) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(166, 245, 240, 0.08) 1px, transparent 1px);
-                background-size: 1.4rem 1.4rem;
-                mask-image: linear-gradient(to bottom, black, transparent 85%);
+                inset: 0 0 0 1rem;
+                background-image: radial-gradient(circle, rgba(166, 245, 240, 0.24) 1px, transparent 1px);
+                background-size: 0.9rem 0.9rem;
+                mask-image: linear-gradient(to left, black, transparent 80%);
+                opacity: 0.45;
                 pointer-events: none;
             }
             .app-header-side-label {
@@ -3394,16 +3396,16 @@ def main() -> None:
                 position: relative;
                 z-index: 1;
                 margin-top: 0.4rem;
-                color: #ffffff;
-                font-size: 1.15rem;
+                color: #c8eaf4;
+                font-size: 1.02rem;
                 font-weight: 800;
             }
             .app-header-side-rule {
                 position: relative;
                 z-index: 1;
-                width: 4rem;
-                height: 0.2rem;
-                margin: 0.7rem 0;
+                width: 3.2rem;
+                height: 0.16rem;
+                margin: 0.55rem 0;
                 border-radius: 999px;
                 background: #41d8cc;
             }
@@ -3424,11 +3426,12 @@ def main() -> None:
             .app-title {
                 margin: 0 !important;
                 color: #ffffff !important;
-                font-size: clamp(1.85rem, 4vw, 3.2rem) !important;
+                font-size: clamp(2rem, 4.2vw, 3.45rem) !important;
                 font-weight: 800 !important;
                 letter-spacing: -0.045em;
                 line-height: 1.04 !important;
             }
+            .app-title-accent { color: #8ef4e8 !important; }
             .app-subtitle {
                 max-width: 52rem;
                 margin: 0.55rem 0 0 !important;
@@ -3599,8 +3602,8 @@ def main() -> None:
                     align-items: flex-start;
                     grid-template-columns: 1fr;
                     margin-bottom: 0.8rem;
-                    padding: 1rem;
-                    border-radius: 14px;
+                    padding: 0.8rem 0.15rem 1rem;
+                    border-radius: 0;
                 }
                 .app-header-side { display: none; }
                 .app-title { font-size: 1.85rem !important; }
@@ -3646,7 +3649,7 @@ def main() -> None:
         <header class="app-header">
             <div class="app-header-copy">
                 <div class="app-eyebrow">Análisis celular</div>
-                <h1 class="app-title">Monitoreo celular en tiempo real</h1>
+                <h1 class="app-title">Monitoreo celular <span class="app-title-accent">en tiempo real</span></h1>
                 <p class="app-subtitle">
                     Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
                 </p>
