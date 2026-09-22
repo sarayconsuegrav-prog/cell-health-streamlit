@@ -14,25 +14,40 @@ También hace seguimiento de objetos para que el número final sea de células �
 
 ### Cámara en Streamlit Cloud
 
-La cámara en vivo usa WebRTC. TURN queda activo cuando existen credenciales
-configuradas, porque Streamlit Cloud puede necesitar un retransmisor para
-entregar el video a otra computadora. Para desactivarlo explícitamente agrega
-`RTC_ENABLE_TURN = "false"` en **Manage app → Settings → Secrets**.
+La cámara en vivo usa WebRTC. La configuración predeterminada intenta primero
+una conexión directa y usa TURN únicamente como respaldo cuando la red bloquea
+la ruta directa. Esto evita consumir cuota TURN durante una conexión normal.
 
-Si el navegador muestra **“Connection is taking longer than expected”** y el
-video queda en blanco, crea credenciales TURN en un proveedor como Metered o
-Twilio y agrega estos Secrets en **Manage app → Settings → Secrets**:
-
-Con Metered OpenRelay puedes guardar el nombre de tu aplicación y la API key; la app solicitará automáticamente las credenciales TURN temporales:
+La aplicación usa Cloudflare TURN como proveedor predeterminado. Crea una TURN
+key en Cloudflare Calls y configura estos Secrets en **Manage app → Settings →
+Secrets**:
 
 ```toml
-METERED_APP_NAME = "nombre_de_tu_app_metered"
-METERED_API_KEY = "tu_api_key_de_metered"
+CLOUDFLARE_TURN_KEY_ID = "uid_de_la_turn_key"
+CLOUDFLARE_TURN_KEY = "clave_larga_de_la_turn_key"
+CLOUDFLARE_TURN_TTL_SECONDS = "86400"
+RTC_TURN_PROVIDER = "cloudflare"
+RTC_ENABLE_TURN = "true"
 ```
 
-Como alternativa, también acepta credenciales TURN ya generadas:
+`CLOUDFLARE_TURN_KEY` es la clave larga devuelta al crear la TURN key; no es
+una clave pública ni debe enviarse al navegador. El servidor solicita
+credenciales efímeras y solo esas credenciales llegan al componente WebRTC.
+
+Si el navegador muestra **“Connection is taking longer than expected”** y el
+video queda en blanco, comprueba primero que los Secrets anteriores estén
+completos. Para probar sin ningún retransmisor, configura:
 
 ```toml
+RTC_ENABLE_TURN = "false"
+```
+
+Metered ya no se usa automáticamente. Solo se puede reactivar como alternativa
+de emergencia con `RTC_TURN_PROVIDER = "metered"` y sus Secrets. También se
+aceptan credenciales TURN estáticas con:
+
+```toml
+RTC_TURN_PROVIDER = "custom"
 RTC_TURN_URLS = "turn:servidor:80,turn:servidor:443,turns:servidor:443?transport=tcp"
 RTC_TURN_USERNAME = "tu_usuario_turn"
 RTC_TURN_CREDENTIAL = "tu_credencial_turn"

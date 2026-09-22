@@ -138,6 +138,7 @@ COLORS_BGR = {
 LIVE_INFERENCE_LOCK = Lock()
 DEFAULT_ICE_SERVERS = [
     {"urls": [
+        "stun:stun.cloudflare.com:3478",
         "stun:stun.l.google.com:19302",
         "stun:stun1.l.google.com:19302",
         "stun:stun2.l.google.com:19302",
@@ -291,6 +292,76 @@ def fetch_metered_ice_servers(app_name: str, api_key: str) -> list[dict[str, Any
     return [server for server in payload if isinstance(server, dict)]
 
 
+def _filter_cloudflare_ice_servers(payload: Any) -> list[dict[str, Any]]:
+    """Normaliza la respuesta de Cloudflare y omite el puerto alternativo 53.
+
+    Cloudflare devuelve varios candidatos TURN para que el navegador elija el
+    transporte disponible. El puerto 53 puede quedar bloqueado o tardar en
+    expirar en algunos navegadores; no hace falta conservarlo porque la misma
+    respuesta incluye 80, 443 y 5349.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("iceServers", payload.get("ice_servers", []))
+    if not isinstance(payload, list):
+        return []
+
+    servers: list[dict[str, Any]] = []
+    for server in payload:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls")
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, list):
+            continue
+        usable_urls = []
+        for url in urls:
+            if not isinstance(url, str):
+                continue
+            base_url = url.split("?", 1)[0]
+            if base_url.rsplit(":", 1)[-1] == "53":
+                continue
+            usable_urls.append(url)
+        if usable_urls:
+            normalized = dict(server)
+            normalized["urls"] = usable_urls
+            servers.append(normalized)
+    return servers
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_cloudflare_ice_servers(
+    turn_key_id: str,
+    turn_key: str,
+    ttl_seconds: int,
+) -> list[dict[str, Any]]:
+    """Solicita credenciales TURN efímeras de Cloudflare.
+
+    La clave larga de TURN solo se usa en el servidor de Streamlit. El
+    navegador recibe únicamente el conjunto de iceServers y credenciales con
+    caducidad, nunca la clave configurada en Secrets.
+    """
+    endpoint = (
+        "https://rtc.live.cloudflare.com/v1/turn/keys/"
+        f"{quote(turn_key_id.strip(), safe='')}/credentials/generate-ice-servers"
+    )
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps({"ttl": ttl_seconds}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {turn_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except (HTTPError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return _filter_cloudflare_ice_servers(payload)
+
+
 def normalize_metered_app_name(value: str) -> str:
     """Acepta tanto el slug de Metered como su dominio completo."""
     raw_value = value.strip()
@@ -305,7 +376,13 @@ def normalize_metered_app_name(value: str) -> str:
 
 
 def rtc_configuration() -> dict[str, Any]:
-    """Construye ICE servers; TURN queda activo salvo desactivación explícita."""
+    """Construye ICE servers con Cloudflare TURN como respaldo opcional.
+
+    La política predeterminada es la de WebRTC: primero se intenta una ruta
+    directa (host/srflx) y solo se usa un candidato relay si la red lo exige.
+    Metered queda fuera del camino predeterminado para no consumir su cuota;
+    puede reactivarse explícitamente con ``RTC_TURN_PROVIDER = "metered"``.
+    """
     ice_servers = [dict(server) for server in DEFAULT_ICE_SERVERS]
     turn_setting = runtime_setting("RTC_ENABLE_TURN").lower()
     turn_enabled = turn_setting not in {"0", "false", "no", "off"}
@@ -324,39 +401,86 @@ def rtc_configuration() -> dict[str, Any]:
             st.warning("RTC_ICE_SERVERS_JSON no tiene un formato JSON válido; se usará STUN.")
         return {"iceServers": ice_servers}
 
-    metered_app_name = normalize_metered_app_name(runtime_setting("METERED_APP_NAME"))
-    metered_api_key = runtime_setting("METERED_API_KEY")
-    if metered_app_name and metered_api_key:
-        if metered_api_key.startswith("pk_live_"):
-            st.warning(
-                "La clave de Metered parece ser una clave Publishable de Realtime. "
-                "Usa la API key de TURN REST en METERED_API_KEY."
+    turn_provider = runtime_setting("RTC_TURN_PROVIDER").lower() or "cloudflare"
+    if turn_provider in {"none", "off", "disabled"}:
+        return {"iceServers": ice_servers}
+
+    if turn_provider in {"cloudflare", "cf"}:
+        turn_key_id = runtime_setting("CLOUDFLARE_TURN_KEY_ID")
+        # Se admite el alias API_TOKEN para facilitar la migración, aunque el
+        # valor debe ser la clave larga emitida al crear la TURN key.
+        turn_key = runtime_setting("CLOUDFLARE_TURN_KEY") or runtime_setting(
+            "CLOUDFLARE_TURN_API_TOKEN"
+        )
+        ttl_raw = runtime_setting("CLOUDFLARE_TURN_TTL_SECONDS") or "86400"
+        try:
+            ttl_seconds = max(300, min(int(ttl_raw), 86400))
+        except ValueError:
+            ttl_seconds = 86400
+
+        if turn_key_id and turn_key:
+            cloudflare_servers = fetch_cloudflare_ice_servers(
+                turn_key_id,
+                turn_key,
+                ttl_seconds,
             )
-        else:
-            metered_servers = fetch_metered_ice_servers(metered_app_name, metered_api_key)
-            if metered_servers:
-                ice_servers.extend(metered_servers)
+            if cloudflare_servers:
+                ice_servers.extend(cloudflare_servers)
             else:
                 st.warning(
-                    "Metered no devolvió servidores TURN. Verifica METERED_APP_NAME "
-                    "y que METERED_API_KEY sea la API key de TURN REST."
+                    "Cloudflare no devolvió credenciales TURN. Se intentará la "
+                    "conexión directa; revisa CLOUDFLARE_TURN_KEY_ID y "
+                    "CLOUDFLARE_TURN_KEY."
                 )
+        elif runtime_setting("METERED_APP_NAME") or runtime_setting("METERED_API_KEY"):
+            st.info(
+                "Metered está configurado, pero fue desactivado por la migración a "
+                "Cloudflare. Configura las credenciales CLOUDFLARE_TURN_* para "
+                "habilitar TURN de respaldo."
+            )
+        return {"iceServers": ice_servers}
 
-    turn_urls = [
-        url.strip()
-        for url in runtime_setting("RTC_TURN_URLS").split(",")
-        if url.strip()
-    ]
-    turn_username = runtime_setting("RTC_TURN_USERNAME")
-    turn_credential = runtime_setting("RTC_TURN_CREDENTIAL")
-    if turn_urls and turn_username and turn_credential:
-        ice_servers.append(
-            {
-                "urls": turn_urls,
-                "username": turn_username,
-                "credential": turn_credential,
-            }
-        )
+    if turn_provider == "metered":
+        metered_app_name = normalize_metered_app_name(runtime_setting("METERED_APP_NAME"))
+        metered_api_key = runtime_setting("METERED_API_KEY")
+        if metered_app_name and metered_api_key:
+            if metered_api_key.startswith("pk_live_"):
+                st.warning(
+                    "La clave de Metered parece ser una clave Publishable de Realtime. "
+                    "Usa la API key de TURN REST en METERED_API_KEY."
+                )
+            else:
+                metered_servers = fetch_metered_ice_servers(metered_app_name, metered_api_key)
+                if metered_servers:
+                    ice_servers.extend(metered_servers)
+                else:
+                    st.warning(
+                        "Metered no devolvió servidores TURN. Verifica METERED_APP_NAME "
+                        "y que METERED_API_KEY sea la API key de TURN REST."
+                    )
+        return {"iceServers": ice_servers}
+
+    if turn_provider in {"custom", "static"}:
+        turn_urls = [
+            url.strip()
+            for url in runtime_setting("RTC_TURN_URLS").split(",")
+            if url.strip()
+        ]
+        turn_username = runtime_setting("RTC_TURN_USERNAME")
+        turn_credential = runtime_setting("RTC_TURN_CREDENTIAL")
+        if turn_urls and turn_username and turn_credential:
+            ice_servers.append(
+                {
+                    "urls": turn_urls,
+                    "username": turn_username,
+                    "credential": turn_credential,
+                }
+            )
+        return {"iceServers": ice_servers}
+
+    st.warning(
+        f"RTC_TURN_PROVIDER='{turn_provider}' no es válido; se usará conexión directa."
+    )
     return {"iceServers": ice_servers}
 
 
