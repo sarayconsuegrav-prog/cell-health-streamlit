@@ -4610,6 +4610,13 @@ def main() -> None:
                 width: 100% !important;
                 height: 100% !important;
             }
+            [class*="st-key-history_preview_"] [class*="st-key-history_play_"] .stButton {
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                width: 100% !important;
+                height: 100% !important;
+            }
             [class*="st-key-history_preview_"] [class*="st-key-history_play_"] button {
                 width: 2.65rem !important;
                 min-width: 2.65rem !important;
