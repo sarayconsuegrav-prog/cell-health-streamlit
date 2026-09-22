@@ -2687,14 +2687,18 @@ def main() -> None:
             }
             .stButton > button:active, .stDownloadButton > button:active,
             button[kind="primary"]:active, [data-testid="stBaseButton-primary"]:active,
-            button[kind="secondary"]:active, [data-testid="stBaseButton-secondary"]:active {
+            button[kind="secondary"]:active, [data-testid="stBaseButton-secondary"]:active,
+            button[kind="secondaryFormSubmit"]:active,
+            [data-testid="stBaseButton-secondaryFormSubmit"]:active {
                 background: #176b8a !important;
                 background-color: #176b8a !important;
                 color: #ffffff !important;
                 -webkit-text-fill-color: #ffffff !important;
                 border-color: #c4fffa !important;
             }
-            button[kind="secondary"], [data-testid="stBaseButton-secondary"] {
+            button[kind="secondary"], [data-testid="stBaseButton-secondary"],
+            button[kind="secondaryFormSubmit"],
+            [data-testid="stBaseButton-secondaryFormSubmit"] {
                 background: #31546b !important;
                 background-color: #31546b !important;
                 color: #ffffff !important;
@@ -2704,7 +2708,11 @@ def main() -> None:
                 min-height: 2.75rem;
             }
             button[kind="secondary"]:hover, [data-testid="stBaseButton-secondary"]:hover,
-            button[kind="secondary"]:focus-visible, [data-testid="stBaseButton-secondary"]:focus-visible {
+            button[kind="secondary"]:focus-visible, [data-testid="stBaseButton-secondary"]:focus-visible,
+            button[kind="secondaryFormSubmit"]:hover,
+            [data-testid="stBaseButton-secondaryFormSubmit"]:hover,
+            button[kind="secondaryFormSubmit"]:focus-visible,
+            [data-testid="stBaseButton-secondaryFormSubmit"]:focus-visible {
                 background: #176b8a !important;
                 background-color: #176b8a !important;
                 color: #ffffff !important;
@@ -2715,10 +2723,17 @@ def main() -> None:
             button[kind="primary"] *, [data-testid="stBaseButton-primary"] * {
                 color: #ffffff !important;
             }
-            button[kind="secondary"] *, [data-testid="stBaseButton-secondary"] * {
+            button[kind="secondary"] *, [data-testid="stBaseButton-secondary"] *,
+            button[kind="secondaryFormSubmit"] *,
+            [data-testid="stBaseButton-secondaryFormSubmit"] * {
                 color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
             }
-            .stButton > button:disabled, button[kind="primary"]:disabled {
+            .stButton > button:disabled, button[kind="primary"]:disabled,
+            button[kind="secondary"]:disabled,
+            [data-testid="stBaseButton-secondary"]:disabled,
+            button[kind="secondaryFormSubmit"]:disabled,
+            [data-testid="stBaseButton-secondaryFormSubmit"]:disabled {
                 background: #31546b !important;
                 background-color: #31546b !important;
                 border-color: #31546b !important;
