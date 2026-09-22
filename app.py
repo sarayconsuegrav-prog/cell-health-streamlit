@@ -2072,7 +2072,6 @@ def render_analysis_history() -> None:
                             if st.button(
                                 "▶",
                                 key=f"history_play_{record_key}",
-                                help="Reproducir video",
                                 type="secondary",
                             ):
                                 st.session_state["history_playing_video"] = history_id
@@ -2089,12 +2088,17 @@ def render_analysis_history() -> None:
                 st.markdown(
                     f"""
                     <div class="history-row-meta">
-                      <div class="history-row-top">
+                      <div class="history-meta-item history-meta-code">
+                        <span class="history-row-label">Código</span>
                         <strong class="history-row-code">{escape(sample_code)}</strong>
-                        <span class="history-card-grade">{escape(grade)}</span>
                       </div>
-                      <div class="history-row-details">
-                        <span><small>Piscina</small><strong>{escape(lot_name)}</strong></span>
+                      <div class="history-meta-item history-meta-pool">
+                        <span class="history-row-label">Piscina</span>
+                        <strong class="history-row-pool">{escape(lot_name)}</strong>
+                      </div>
+                      <div class="history-meta-item history-meta-grade">
+                        <span class="history-row-label">Grado</span>
+                        <strong class="history-card-grade">{escape(grade)}</strong>
                       </div>
                     </div>
                     """,
@@ -4256,10 +4260,34 @@ def main() -> None:
                 background: #0d3153 !important;
                 color: #ffffff !important;
             }
+            /* Los tooltips de Streamlit se renderizan en un portal y usan
+               colores del tema base (claro), por encima de nuestro CSS. */
+            [data-testid="stTooltipContent"],
+            [data-testid="stTooltipErrorContent"],
+            [data-testid="stDataFrameTooltipContent"],
+            [role="tooltip"] {
+                background: #0a2745 !important;
+                background-color: #0a2745 !important;
+                color: #eff7ff !important;
+                border: 1px solid #2c8396 !important;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+            }
+            [data-testid="stTooltipContent"] *,
+            [data-testid="stTooltipErrorContent"] *,
+            [data-testid="stDataFrameTooltipContent"] *,
+            [role="tooltip"] * {
+                color: #eff7ff !important;
+                -webkit-text-fill-color: #eff7ff !important;
+            }
             [data-baseweb="popover"] [role="option"]:hover,
             [data-baseweb="popover"] [aria-selected="true"] {
                 background: #176b8a !important;
                 color: #ffffff !important;
+            }
+            [data-baseweb="popover"] {
+                background: #0d3153 !important;
+                color: #ffffff !important;
+                border: 1px solid #2c8396 !important;
             }
             [data-testid="stRadio"] div[role="radiogroup"] { gap: 0.5rem; }
             [data-testid="stRadio"] label {
@@ -4862,52 +4890,61 @@ def main() -> None:
                 text-align: center;
             }
             .history-row-meta {
-                min-width: 0;
-                padding: 0.4rem 0.55rem;
-            }
-            .history-row-top {
-                display: flex;
+                display: grid;
+                grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) minmax(0, 1.35fr);
                 align-items: center;
-                justify-content: space-between;
-                gap: 0.65rem;
+                gap: clamp(0.7rem, 1.8vw, 1.35rem);
+                min-width: 0;
+                width: 100%;
+                padding: 0.6rem 0.9rem;
+            }
+            .history-meta-item {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                justify-content: center;
+                gap: 0.32rem;
+                min-width: 0;
             }
             .history-row-code {
                 min-width: 0;
                 overflow-wrap: anywhere;
                 color: #ffffff;
-                font-size: clamp(1.15rem, 2.1vw, 1.45rem);
-                font-weight: 750;
+                font-size: clamp(0.98rem, 1.35vw, 1.12rem);
+                font-weight: 700;
             }
-            .history-row-details {
-                display: block;
-                margin-top: 0.8rem;
-            }
-            .history-row-details span { min-width: 0; }
-            .history-row-details small,
-            .history-row-details strong {
-                display: block;
-                overflow-wrap: anywhere;
-            }
-            .history-row-details small {
+            .history-row-label {
                 color: #a6d8eb;
-                font-size: 0.82rem;
-                font-weight: 600;
+                font-size: 0.76rem;
+                font-weight: 700;
+                letter-spacing: 0.055em;
+                text-transform: uppercase;
             }
-            .history-row-details strong {
-                margin-top: 0.2rem;
+            .history-row-pool {
+                min-width: 0;
+                overflow-wrap: anywhere;
                 color: #ffffff;
-                font-size: clamp(1rem, 1.6vw, 1.18rem);
+                font-size: clamp(1rem, 1.45vw, 1.18rem);
                 font-weight: 650;
             }
             .history-card-grade {
-                flex: 0 0 auto;
-                padding: 0.36rem 0.72rem;
-                background: #176b8a;
-                border: 1px solid #6bbfd1;
-                border-radius: 999px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 2.9rem;
+                padding: 0.35rem 0.95rem;
+                background: linear-gradient(135deg, #0f7c86, #176b8a);
+                border: 1px solid #8ef4e8;
+                border-radius: 12px;
                 color: #ffffff;
-                font-size: 0.9rem;
-                font-weight: 800;
+                font-size: clamp(1.25rem, 2vw, 1.65rem);
+                font-weight: 850;
+                line-height: 1.05;
+                white-space: nowrap;
+            }
+            .history-meta-grade {
+                align-items: flex-end;
+                text-align: right;
             }
             @media (max-width: 380px) {
                 [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"] {
@@ -4920,6 +4957,20 @@ def main() -> None:
                     flex: 1 1 100% !important;
                 }
                 [class*="st-key-history_preview_"] { max-width: 250px; }
+            }
+            @media (max-width: 620px) {
+                .history-row-meta {
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    gap: 0.8rem;
+                    padding: 0.55rem 0.4rem;
+                }
+                .history-meta-grade {
+                    grid-column: 2;
+                    grid-row: 1;
+                }
+                .history-meta-pool {
+                    grid-column: 1 / -1;
+                }
             }
             [data-testid="stTabs"] {
                 margin: 0.35rem 0 1.1rem !important;
@@ -5074,6 +5125,18 @@ def main() -> None:
             .stDownloadButton > button:hover:not(:disabled) {
                 transform: translateY(-1px);
                 box-shadow: 0 7px 15px rgba(0, 0, 0, 0.16);
+            }
+            /* La miniatura del historial no debe saltar ni cambiar al pasar
+               el puntero; el botón de reproducción se mantiene estable. */
+            [class*="st-key-history_preview_"] [class*="st-key-history_play_"] .stButton > button:hover:not(:disabled) {
+                background: rgba(6, 38, 68, 0.88) !important;
+                background-color: rgba(6, 38, 68, 0.88) !important;
+                border-color: rgba(177, 255, 247, 0.9) !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+                transform: none !important;
+                box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35) !important;
+                transition: none !important;
             }
             @media (max-width: 768px) {
                 [data-testid="stMainBlockContainer"] {
