@@ -3337,11 +3337,202 @@ def main() -> None:
                     min-width: 0 !important;
                 }
             }
+
+            /* Capa visual de aplicación: jerarquía clara, paneles compactos
+               y navegación que se adapta a escritorio y móvil. */
+            [data-testid="stMainBlockContainer"] {
+                width: min(100%, 92rem) !important;
+                max-width: 92rem !important;
+                margin: 0 auto !important;
+            }
+            .app-header {
+                position: relative;
+                display: flex;
+                align-items: flex-end;
+                gap: 1rem;
+                margin: 0 0 1.15rem;
+                padding: 1.2rem 1.35rem 1.25rem;
+                overflow: hidden;
+                background: linear-gradient(135deg, #0a2745 0%, #103858 62%, #0e5068 100%);
+                border: 1px solid rgba(107, 191, 209, 0.46);
+                border-radius: 18px;
+                box-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
+            }
+            .app-header::after {
+                content: "";
+                position: absolute;
+                width: 18rem;
+                height: 18rem;
+                right: -8rem;
+                top: -12rem;
+                border-radius: 50%;
+                background: rgba(65, 216, 204, 0.14);
+                pointer-events: none;
+            }
+            .app-header-copy { position: relative; z-index: 1; }
+            .app-eyebrow {
+                margin-bottom: 0.38rem;
+                color: #a6f5f0;
+                font-size: 0.7rem;
+                font-weight: 800;
+                letter-spacing: 0.14em;
+                text-transform: uppercase;
+            }
+            .app-title {
+                margin: 0 !important;
+                color: #ffffff !important;
+                font-size: clamp(1.85rem, 4vw, 3.2rem) !important;
+                font-weight: 800 !important;
+                letter-spacing: -0.045em;
+                line-height: 1.04 !important;
+            }
+            .app-subtitle {
+                max-width: 52rem;
+                margin: 0.55rem 0 0 !important;
+                color: #c8eaf4 !important;
+                font-size: clamp(0.82rem, 1.4vw, 0.98rem) !important;
+                line-height: 1.45 !important;
+            }
+            [data-testid="stTabs"] {
+                margin: 0.35rem 0 1.1rem !important;
+            }
+            [data-testid="stTabs"] [role="tablist"] {
+                display: flex !important;
+                flex-wrap: wrap !important;
+                gap: 0.35rem !important;
+                padding: 0.35rem !important;
+                overflow: visible !important;
+                background: rgba(10, 39, 69, 0.82) !important;
+                border: 1px solid rgba(107, 191, 209, 0.4) !important;
+                border-radius: 13px !important;
+                box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12);
+            }
+            [data-testid="stTabs"] [role="tab"] {
+                flex: 0 1 auto !important;
+                min-height: 2.45rem !important;
+                padding: 0.58rem 0.95rem !important;
+                background: transparent !important;
+                border: 1px solid transparent !important;
+                border-radius: 9px !important;
+                color: #c8eaf4 !important;
+                -webkit-text-fill-color: #c8eaf4 !important;
+                font-size: 0.88rem !important;
+                font-weight: 750 !important;
+                white-space: nowrap !important;
+                transition: background 160ms ease, border-color 160ms ease,
+                    color 160ms ease, transform 160ms ease !important;
+            }
+            [data-testid="stTabs"] [role="tab"]:hover,
+            [data-testid="stTabs"] [role="tab"]:focus-visible,
+            [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+                background: linear-gradient(135deg, #176b8a, #0f7c86) !important;
+                background-color: #176b8a !important;
+                border-color: #8ef4e8 !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+                outline: none !important;
+            }
+            [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+                box-shadow: 0 4px 12px rgba(15, 124, 134, 0.28);
+            }
+            [data-testid="stTabs"] [role="tab"]:hover {
+                transform: translateY(-1px);
+            }
+            [data-testid="stTabs"] [role="tab"]::after {
+                display: none !important;
+            }
+            [data-testid="stTabs"] [role="tab"] * {
+                color: inherit !important;
+                -webkit-text-fill-color: inherit !important;
+            }
+            [data-testid="stTabs"] [data-baseweb="tab-panel"] {
+                padding-top: 0.55rem !important;
+            }
+            /* Las pestañas internas se leen como una segunda navegación, no
+               como otro bloque grande de la página. */
+            [data-testid="stTabs"] [data-baseweb="tab-panel"] [data-testid="stTabs"] {
+                margin-top: 0.15rem !important;
+                margin-bottom: 0.85rem !important;
+            }
+            [data-testid="stTabs"] [data-baseweb="tab-panel"] [data-testid="stTabs"] [role="tablist"] {
+                padding: 0.25rem !important;
+                background: rgba(13, 49, 83, 0.58) !important;
+                border-color: rgba(107, 191, 209, 0.27) !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stTabs"] [data-baseweb="tab-panel"] [data-testid="stTabs"] [role="tab"] {
+                min-height: 2.2rem !important;
+                padding: 0.46rem 0.78rem !important;
+                font-size: 0.82rem !important;
+            }
+            [data-testid="stWidgetLabel"] label,
+            [data-testid="stWidgetLabel"] p {
+                color: #c8eaf4 !important;
+                font-size: 0.82rem !important;
+                font-weight: 700 !important;
+                letter-spacing: 0.01em;
+            }
+            [data-testid="stTextInput"],
+            [data-testid="stSelectbox"],
+            [data-testid="stFileUploader"] {
+                filter: drop-shadow(0 4px 9px rgba(0, 0, 0, 0.08));
+            }
+            .stButton > button, .stDownloadButton > button {
+                border-radius: 10px !important;
+                box-shadow: 0 4px 11px rgba(0, 0, 0, 0.1);
+                transition: transform 160ms ease, box-shadow 160ms ease,
+                    background 160ms ease !important;
+            }
+            .stButton > button:hover:not(:disabled),
+            .stDownloadButton > button:hover:not(:disabled) {
+                transform: translateY(-1px);
+                box-shadow: 0 7px 15px rgba(0, 0, 0, 0.16);
+            }
+            @media (max-width: 768px) {
+                [data-testid="stMainBlockContainer"] {
+                    width: 100% !important;
+                    padding: 3.75rem 0.75rem 2rem !important;
+                }
+                .app-header {
+                    align-items: flex-start;
+                    margin-bottom: 0.8rem;
+                    padding: 1rem;
+                    border-radius: 14px;
+                }
+                .app-title { font-size: 1.85rem !important; }
+                .app-subtitle { font-size: 0.8rem !important; }
+                [data-testid="stTabs"] [role="tablist"] {
+                    flex-wrap: nowrap !important;
+                    overflow-x: auto !important;
+                    scrollbar-width: none;
+                }
+                [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar {
+                    display: none;
+                }
+                [data-testid="stTabs"] [role="tab"] {
+                    flex: 0 0 auto !important;
+                    font-size: 0.8rem !important;
+                    padding-inline: 0.75rem !important;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    st.title("Monitoreo celular en tiempo real")
+    st.markdown(
+        """
+        <header class="app-header">
+            <div class="app-header-copy">
+                <div class="app-eyebrow">Análisis celular</div>
+                <h1 class="app-title">Monitoreo celular en tiempo real</h1>
+                <p class="app-subtitle">
+                    Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
+                </p>
+            </div>
+        </header>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Parámetros internos: se ocultan para mantener la interfaz enfocada en el análisis.
     confidence = 0.35
