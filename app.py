@@ -3348,9 +3348,8 @@ def main() -> None:
             .app-header {
                 position: relative;
                 display: grid;
-                grid-template-columns: minmax(0, 1.45fr) minmax(12rem, 0.55fr);
+                grid-template-columns: 1fr;
                 align-items: stretch;
-                gap: 1rem;
                 margin: 0 0 0.9rem;
                 padding: 0.95rem 0.25rem 1.25rem;
                 overflow: visible;
@@ -3361,60 +3360,6 @@ def main() -> None:
                 box-shadow: none;
             }
             .app-header-copy { position: relative; z-index: 1; }
-            .app-header-side {
-                position: relative;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                min-height: 6.5rem;
-                padding: 0.5rem 0 0.5rem 1.25rem;
-                background: transparent;
-                border: 0;
-                border-left: 1px solid rgba(107, 191, 209, 0.4);
-                border-radius: 0;
-                overflow: hidden;
-            }
-            .app-header-side::after {
-                content: "";
-                position: absolute;
-                inset: 0 0 0 1rem;
-                background-image: radial-gradient(circle, rgba(166, 245, 240, 0.24) 1px, transparent 1px);
-                background-size: 0.9rem 0.9rem;
-                mask-image: linear-gradient(to left, black, transparent 80%);
-                opacity: 0.45;
-                pointer-events: none;
-            }
-            .app-header-side-label {
-                position: relative;
-                z-index: 1;
-                color: #a6f5f0;
-                font-size: 0.68rem;
-                font-weight: 800;
-                letter-spacing: 0.12em;
-            }
-            .app-header-side-title {
-                position: relative;
-                z-index: 1;
-                margin-top: 0.4rem;
-                color: #c8eaf4;
-                font-size: 1.02rem;
-                font-weight: 800;
-            }
-            .app-header-side-rule {
-                position: relative;
-                z-index: 1;
-                width: 3.2rem;
-                height: 0.16rem;
-                margin: 0.55rem 0;
-                border-radius: 999px;
-                background: #41d8cc;
-            }
-            .app-header-side-caption {
-                position: relative;
-                z-index: 1;
-                color: #c8eaf4;
-                font-size: 0.78rem;
-            }
             .app-eyebrow {
                 margin-bottom: 0.38rem;
                 color: #a6f5f0;
@@ -3605,7 +3550,6 @@ def main() -> None:
                     padding: 0.8rem 0.15rem 1rem;
                     border-radius: 0;
                 }
-                .app-header-side { display: none; }
                 .app-title { font-size: 1.85rem !important; }
                 .app-subtitle { font-size: 0.8rem !important; }
                 [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] > [data-testid="stButtonGroup"] {
@@ -3653,12 +3597,6 @@ def main() -> None:
                 <p class="app-subtitle">
                     Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
                 </p>
-            </div>
-            <div class="app-header-side" aria-hidden="true">
-                <div class="app-header-side-label">FLUJO DE ANÁLISIS</div>
-                <div class="app-header-side-title">Imagen · detección · reporte</div>
-                <div class="app-header-side-rule"></div>
-                <div class="app-header-side-caption">Foto · video · cámara en vivo</div>
             </div>
         </header>
         """,
