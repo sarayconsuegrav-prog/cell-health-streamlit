@@ -711,21 +711,116 @@ def reset_trackers(model: YOLO) -> None:
             tracker.reset()
 
 
+def _mask_data_at_frame_size(
+    result: Any,
+    frame_shape: tuple[int, ...],
+) -> np.ndarray | None:
+    """Devuelve las máscaras rasterizadas, una por instancia, al tamaño del video.
+
+    `Masks.xy` es útil para dibujar contornos, pero en modelos OpenVINO puede
+    perder instancias pequeñas al convertir cada máscara a un polígono. La
+    matriz rasterizada conserva cada instancia y Ultralytics ya conoce cómo
+    retirar el padding de letterbox al escalarla a la imagen original.
+    """
+    masks = getattr(result, "masks", None)
+    raw_data = getattr(masks, "data", None)
+    if raw_data is None:
+        return None
+
+    height, width = frame_shape[:2]
+    try:
+        import torch
+        from ultralytics.utils import ops
+
+        if isinstance(raw_data, torch.Tensor):
+            data = raw_data.detach()
+        else:
+            data = torch.as_tensor(np.asarray(raw_data))
+        if data.ndim == 2:
+            data = data.unsqueeze(0)
+        if data.ndim != 3:
+            return None
+        scaled = ops.scale_masks(
+            data.unsqueeze(1),
+            (height, width),
+            mode="nearest",
+        ).squeeze(1)
+        return scaled.detach().cpu().numpy() > 0.5
+    except Exception:
+        # El respaldo mantiene funcionando el render si cambia el tipo de
+        # tensor entregado por una versión futura del backend.
+        try:
+            if hasattr(raw_data, "detach"):
+                array = raw_data.detach().cpu().numpy()
+            else:
+                array = np.asarray(raw_data)
+            if array.ndim == 2:
+                array = array[None, ...]
+            if array.ndim == 4 and array.shape[1] == 1:
+                array = array[:, 0]
+            if array.ndim != 3:
+                return None
+            return np.stack(
+                [
+                    cv2.resize(
+                        mask.astype(np.float32),
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    > 0.5
+                    for mask in array
+                ],
+                axis=0,
+            )
+        except Exception:
+            return None
+
+
+def _paint_instance_mask(
+    canvas: np.ndarray,
+    mask: np.ndarray,
+    color: tuple[int, int, int],
+) -> bool:
+    """Pinta una instancia y su borde para que células contiguas no se fusionen visualmente."""
+    binary_mask = np.asarray(mask, dtype=np.uint8)
+    if binary_mask.ndim != 2 or not np.any(binary_mask):
+        return False
+
+    canvas[binary_mask.astype(bool)] = color
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        outline = tuple(min(255, int(channel) + 45) for channel in color)
+        thickness = max(1, round(min(canvas.shape[:2]) / 500))
+        cv2.drawContours(canvas, contours, -1, outline, thickness, lineType=cv2.LINE_AA)
+    return True
+
+
 def mask_frame(
     result: Any,
     frame_shape: tuple[int, ...],
     model_names: dict[int, str],
     included_categories: set[str] | None = None,
 ) -> np.ndarray:
-    """Construye un cuadro negro con las máscaras de las clases indicadas."""
+    """Construye un cuadro con una capa visible por cada instancia segmentada."""
     height, width = frame_shape[:2]
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
     if result.masks is None or result.boxes is None:
         return canvas
 
-    polygons = result.masks.xy
     class_ids = result.boxes.cls.int().cpu().tolist()
+    raster_masks = _mask_data_at_frame_size(result, frame_shape)
+    if raster_masks is not None and len(raster_masks) == len(class_ids):
+        for mask, class_id in zip(raster_masks, class_ids):
+            class_name = model_names.get(int(class_id), str(class_id))
+            category = normalize_class_name(class_name)
+            if included_categories is not None and category not in included_categories:
+                continue
+            _paint_instance_mask(canvas, mask, COLORS_BGR[category])
+        return canvas
+
+    # Compatibilidad con resultados que solo exponen contornos `.xy`.
+    polygons = result.masks.xy
     for polygon, class_id in zip(polygons, class_ids):
         polygon = np.asarray(polygon, dtype=np.int32)
         if polygon.shape[0] < 3:
@@ -736,6 +831,15 @@ def mask_frame(
             continue
         color = COLORS_BGR[category]
         cv2.fillPoly(canvas, [polygon.reshape((-1, 1, 2))], color)
+        outline = tuple(min(255, int(channel) + 45) for channel in color)
+        cv2.polylines(
+            canvas,
+            [polygon.reshape((-1, 1, 2))],
+            isClosed=True,
+            color=outline,
+            thickness=max(1, round(min(height, width) / 500)),
+            lineType=cv2.LINE_AA,
+        )
 
     return canvas
 
@@ -2240,6 +2344,7 @@ def process_video(
             tracker="bytetrack.yaml",
             conf=confidence,
             imgsz=image_size,
+            retina_masks=True,
             vid_stride=frame_stride,
             verbose=False,
         )
@@ -3014,6 +3119,7 @@ def render_live_camera(
                     source=image,
                     conf=confidence,
                     imgsz=resolution["inference_size"],
+                    retina_masks=True,
                     persist=True,
                     tracker="bytetrack.yaml",
                     verbose=False,
