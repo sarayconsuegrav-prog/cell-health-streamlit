@@ -3370,6 +3370,69 @@ def main() -> None:
                 pointer-events: none;
             }
             .app-header-copy { position: relative; z-index: 1; }
+            .app-topbar {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+                align-items: center;
+                gap: 1rem;
+                margin: 0 0 1rem;
+                padding: 0.58rem 0.8rem;
+                background: #f8fbfc;
+                border: 1px solid #dbe7ec;
+                border-radius: 14px;
+                box-shadow: 0 8px 22px rgba(0, 0, 0, 0.13);
+                color: #071a31;
+            }
+            .app-brand {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.55rem;
+                min-width: 0;
+                color: #071a31;
+                font-size: 0.96rem;
+                font-weight: 850;
+                letter-spacing: -0.02em;
+            }
+            .app-brand-mark {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 2rem;
+                height: 2rem;
+                flex: 0 0 auto;
+                border-radius: 0.65rem;
+                background: #071a31;
+                color: #c4fffa;
+                font-size: 0.65rem;
+                font-weight: 900;
+                letter-spacing: 0.04em;
+            }
+            .app-topbar-context {
+                color: #657486;
+                font-size: 0.72rem;
+                font-weight: 750;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                white-space: nowrap;
+            }
+            .app-topbar-actions {
+                display: inline-flex;
+                justify-self: end;
+                align-items: center;
+                gap: 0.4rem;
+                color: #0f7c86;
+                font-size: 0.76rem;
+                font-weight: 800;
+                white-space: nowrap;
+            }
+            .app-topbar-actions::before {
+                content: "";
+                width: 0.45rem;
+                height: 0.45rem;
+                border-radius: 50%;
+                background: #12b8c2;
+                box-shadow: 0 0 0 3px rgba(18, 184, 194, 0.16);
+            }
             .app-eyebrow {
                 margin-bottom: 0.38rem;
                 color: #a6f5f0;
@@ -3451,6 +3514,43 @@ def main() -> None:
                 color: inherit !important;
                 -webkit-text-fill-color: inherit !important;
             }
+            /* La primera navegación adopta el patrón de barra superior de una
+               aplicación: clara, horizontal y con un activo muy visible. */
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) {
+                margin: 0 0 1.25rem !important;
+            }
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] {
+                justify-content: center !important;
+                gap: 0.15rem !important;
+                padding: 0.3rem 0.45rem !important;
+                background: #f8fbfc !important;
+                border: 1px solid #dbe7ec !important;
+                border-radius: 12px !important;
+                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12) !important;
+            }
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"] {
+                min-height: 2.35rem !important;
+                padding: 0.54rem 0.95rem !important;
+                background: transparent !important;
+                border: 1px solid transparent !important;
+                border-radius: 8px !important;
+                color: #43556a !important;
+                -webkit-text-fill-color: #43556a !important;
+                font-size: 0.84rem !important;
+            }
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:hover,
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:focus-visible,
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"][aria-selected="true"] {
+                background: #dff6f3 !important;
+                border-color: #b3e6e1 !important;
+                color: #075d68 !important;
+                -webkit-text-fill-color: #075d68 !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stTabs"]:has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] .react-aria-SelectionIndicator {
+                background: #0f7c86 !important;
+                height: 0.18rem !important;
+            }
             [data-testid="stTabs"] [data-baseweb="tab-panel"] {
                 padding-top: 0.55rem !important;
             }
@@ -3505,6 +3605,13 @@ def main() -> None:
                     padding: 1rem;
                     border-radius: 14px;
                 }
+                .app-topbar {
+                    grid-template-columns: 1fr auto;
+                    gap: 0.55rem;
+                    padding: 0.5rem 0.65rem;
+                }
+                .app-topbar-context { display: none; }
+                .app-topbar-actions { font-size: 0.7rem; }
                 .app-title { font-size: 1.85rem !important; }
                 .app-subtitle { font-size: 0.8rem !important; }
                 [data-testid="stTabs"] [role="tablist"] {
@@ -3527,6 +3634,14 @@ def main() -> None:
     )
     st.markdown(
         """
+        <nav class="app-topbar" aria-label="Navegación de la aplicación">
+            <div class="app-brand">
+                <span class="app-brand-mark">CH</span>
+                <span>Cell Health</span>
+            </div>
+            <div class="app-topbar-context">Plataforma de análisis</div>
+            <div class="app-topbar-actions">Mancha blanca</div>
+        </nav>
         <header class="app-header">
             <div class="app-header-copy">
                 <div class="app-eyebrow">Análisis celular</div>
