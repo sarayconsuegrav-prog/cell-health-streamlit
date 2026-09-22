@@ -1641,6 +1641,40 @@ def history_video_path(record: dict[str, Any]) -> Path:
     return recording_path
 
 
+@st.cache_data(show_spinner=False, max_entries=96)
+def history_video_thumbnail(video_path: str, modified_ns: int) -> bytes:
+    """Extrae una miniatura pequeña del video para la lista del historial."""
+    del modified_ns  # Se conserva como parte de la clave de caché para invalidarla al cambiar el archivo.
+    capture = cv2.VideoCapture(video_path)
+    try:
+        if not capture.isOpened():
+            return b""
+        capture.set(cv2.CAP_PROP_POS_MSEC, 500)
+        success, frame = capture.read()
+        if not success:
+            capture.set(cv2.CAP_PROP_POS_MSEC, 0)
+            success, frame = capture.read()
+        if not success or frame is None:
+            return b""
+        frame_height, frame_width = frame.shape[:2]
+        if frame_width > 480:
+            preview_width = 480
+            preview_height = max(1, round(frame_height * preview_width / frame_width))
+            frame = cv2.resize(
+                frame,
+                (preview_width, preview_height),
+                interpolation=cv2.INTER_AREA,
+            )
+        encoded, image_bytes = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 78],
+        )
+        return image_bytes.tobytes() if encoded else b""
+    finally:
+        capture.release()
+
+
 def add_live_sample_to_history(
     sample: dict[str, Any],
     low_limit: float = 10.0,
@@ -1739,58 +1773,122 @@ def sync_history_sample_codes(samples: list[dict[str, Any]]) -> None:
 def render_analysis_history() -> None:
     """Renderiza el historial filtrable con reproducción de videos de la sesión."""
     st.subheader("Historial")
-    selected_type = st.selectbox(
-        "Tipo de historial",
-        [WHITE_SPOT_LABEL, VACUOLIZATION_LABEL],
-        key="history_model_filter",
-    )
+    type_column, grade_column = st.columns([1.5, 1.0], gap="medium")
+    with type_column:
+        selected_type = st.selectbox(
+            "Tipo de historial",
+            [WHITE_SPOT_LABEL, VACUOLIZATION_LABEL],
+            key="history_model_filter",
+        )
     records = [
         record
         for record in reversed(get_analysis_history())
         if record.get("model_label") == selected_type
     ]
+    grade_options = ["Todos los grados", *(f"Grado {grade}" for grade in range(5)), "Sin datos"]
+    with grade_column:
+        selected_grade = st.selectbox(
+            "Filtrar por grado",
+            grade_options,
+            key="history_grade_filter",
+        )
+    if selected_grade != "Todos los grados":
+        records = [
+            record
+            for record in records
+            if str(record.get("grade") or "Sin datos").strip() == selected_grade
+        ]
+
     if not records:
         st.markdown(
             f'<div class="history-empty"><strong>{escape(selected_type)}</strong>'
-            "<span>Aún no hay muestras guardadas en este historial.</span></div>",
+            f"<span>{'No hay muestras de ese grado.' if selected_grade != 'Todos los grados' else 'Aún no hay muestras guardadas en este historial.'}</span></div>",
             unsafe_allow_html=True,
         )
         return
 
     st.markdown(
-        f'<div class="history-count">{len(records)} muestra(s) en {escape(selected_type)}</div>',
+        f'<div class="history-count">{len(records)} muestra(s)</div>',
         unsafe_allow_html=True,
     )
-    for record in records:
+    page_size = 12
+    page_count = math.ceil(len(records) / page_size)
+    if page_count > 1:
+        page_state_key = "history_page_" + hashlib.sha256(
+            f"{selected_type}|{selected_grade}".encode("utf-8")
+        ).hexdigest()[:10]
+        page_number = st.selectbox(
+            "Página",
+            range(1, page_count + 1),
+            format_func=lambda page: f"Página {page} de {page_count}",
+            key=page_state_key,
+        )
+    else:
+        page_number = 1
+    start_index = (page_number - 1) * page_size
+    page_records = records[start_index : start_index + page_size]
+    for index, record in enumerate(page_records):
         video_path = history_video_path(record)
         video_available = _video_path_is_ready(video_path)
-        video_state = "Reproducible" if video_available else "No disponible"
-        st.markdown(
-            f"""
-            <article class="history-card">
-              <div class="history-card-heading">
-                <div>
-                  <span class="history-card-kicker">{escape(str(record.get('model_label') or selected_type))}</span>
-                  <strong>{escape(str(record.get('sample_label') or 'Muestra'))}</strong>
-                </div>
-                <span class="history-card-grade">{escape(str(record.get('grade') or 'Sin grado'))}</span>
-              </div>
-              <div class="history-card-grid">
-                <div><span>Fecha</span><strong>{escape(str(record.get('captured_at') or '—'))}</strong></div>
-                <div><span>Piscina / lote</span><strong>{escape(str(record.get('lot_name') or '—'))}</strong></div>
-                <div><span>Código</span><strong>{escape(str(record.get('sample_code') or '—'))}</strong></div>
-                <div><span>Video</span><strong>{escape(video_state)}</strong></div>
-              </div>
-            </article>
-            """,
-            unsafe_allow_html=True,
-        )
-        if video_available:
-            st.video(str(video_path), format="video/mp4")
-        else:
-            st.caption(
-                "La fecha y el grado permanecen guardados, pero este registro no tiene un video disponible."
+        history_id = str(record.get("history_id") or f"history-{index}")
+        record_key = hashlib.sha256(history_id.encode("utf-8")).hexdigest()[:12]
+        preview_key = f"history_preview_{record_key}"
+        with st.container(key=f"history_row_{record_key}"):
+            video_column, metadata_column = st.columns(
+                [1.05, 2.8], gap="medium", vertical_alignment="center"
             )
+            with video_column:
+                with st.container(key=preview_key):
+                    if not video_available:
+                        st.markdown(
+                            '<div class="history-video-missing">Video no disponible</div>',
+                            unsafe_allow_html=True,
+                        )
+                    elif st.session_state.get("history_playing_video") == history_id:
+                        st.video(str(video_path), format="video/mp4")
+                    else:
+                        try:
+                            modified_ns = video_path.stat().st_mtime_ns
+                        except OSError:
+                            modified_ns = 0
+                        thumbnail = history_video_thumbnail(str(video_path), modified_ns)
+                        if thumbnail:
+                            st.image(thumbnail, use_container_width=True)
+                            if st.button(
+                                "▶",
+                                key=f"history_play_{record_key}",
+                                help="Reproducir video",
+                                type="secondary",
+                            ):
+                                st.session_state["history_playing_video"] = history_id
+                                st.rerun()
+                        else:
+                            st.markdown(
+                                '<div class="history-video-missing">No se pudo cargar el video</div>',
+                                unsafe_allow_html=True,
+                            )
+            with metadata_column:
+                sample_code = str(record.get("sample_code") or "—")
+                grade = str(record.get("grade") or "Sin datos")
+                captured_at = str(record.get("captured_at") or "—")
+                lot_name = str(record.get("lot_name") or "—")
+                st.markdown(
+                    f"""
+                    <div class="history-row-meta">
+                      <div class="history-row-top">
+                        <strong class="history-row-code">{escape(sample_code)}</strong>
+                        <span class="history-card-grade">{escape(grade)}</span>
+                      </div>
+                      <div class="history-row-details">
+                        <span><small>Fecha</small><strong>{escape(captured_at)}</strong></span>
+                        <span><small>Piscina / lote</small><strong>{escape(lot_name)}</strong></span>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        if index < len(page_records) - 1:
+            st.markdown('<div class="history-row-divider"></div>', unsafe_allow_html=True)
 
 
 def normalize_pool_name(value: str) -> str:
@@ -4482,68 +4580,131 @@ def main() -> None:
                 color: #ffffff;
             }
             .history-empty span { color: #a6d8eb; font-size: 0.86rem; }
-            .history-card {
-                margin: 1rem 0 0.55rem;
-                padding: 0.95rem 1rem;
+            [class*="st-key-history_row_"] {
+                margin-top: 0.75rem;
+                padding: 0.3rem 0 0.55rem;
+            }
+            [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"] {
+                align-items: center;
+            }
+            [class*="st-key-history_row_"] [data-testid="stColumn"]:first-child {
+                max-width: 250px;
+            }
+            [class*="st-key-history_preview_"] {
+                position: relative !important;
+                overflow: hidden;
+                border: 1px solid rgba(107, 191, 209, 0.5);
+                border-radius: 10px;
                 background: #0a2745;
-                border: 1px solid #2c8396;
-                border-radius: 13px;
-                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
             }
-            .history-card-heading {
-                display: flex;
-                align-items: flex-start;
-                justify-content: space-between;
-                gap: 0.8rem;
+            [class*="st-key-history_preview_"] [data-testid="stImage"] {
+                margin: 0 !important;
             }
-            .history-card-heading > div {
-                display: flex;
-                flex-direction: column;
-                gap: 0.2rem;
-                min-width: 0;
+            [class*="st-key-history_preview_"] [data-testid="stButton"] {
+                position: absolute !important;
+                inset: 0 !important;
+                z-index: 3;
+                display: flex !important;
+                align-items: center;
+                justify-content: center;
+                width: 100% !important;
+                height: 100% !important;
+                pointer-events: none;
             }
-            .history-card-kicker {
-                color: #a6f5f0;
+            [class*="st-key-history_preview_"] [data-testid="stButton"] button {
+                width: 2.65rem !important;
+                min-width: 2.65rem !important;
+                height: 2.65rem !important;
+                min-height: 2.65rem !important;
+                padding: 0 !important;
+                border: 1px solid rgba(177, 255, 247, 0.9) !important;
+                border-radius: 50% !important;
+                background: rgba(6, 38, 68, 0.88) !important;
+                color: #ffffff !important;
+                font-size: 1.1rem !important;
+                box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+                pointer-events: auto;
+            }
+            [class*="st-key-history_preview_"] [data-testid="stVideo"] {
+                margin: 0 !important;
+                overflow: hidden;
+                border-radius: 9px;
+            }
+            .history-video-missing {
+                display: grid;
+                aspect-ratio: 16 / 9;
+                place-items: center;
+                padding: 0.35rem;
+                background: #0a2745;
+                color: #a6d8eb;
                 font-size: 0.68rem;
-                font-weight: 800;
-                letter-spacing: 0.08em;
-                text-transform: uppercase;
+                text-align: center;
             }
-            .history-card-heading strong {
+            .history-row-meta {
+                min-width: 0;
+                padding: 0.4rem 0.2rem;
+            }
+            .history-row-top {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.65rem;
+            }
+            .history-row-code {
+                min-width: 0;
+                overflow-wrap: anywhere;
                 color: #ffffff;
-                font-size: 1rem;
+                font-size: clamp(0.95rem, 2.5vw, 1.18rem);
+                font-weight: 750;
+            }
+            .history-row-details {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.7rem;
+                margin-top: 0.65rem;
+            }
+            .history-row-details span { min-width: 0; }
+            .history-row-details small,
+            .history-row-details strong {
+                display: block;
+                overflow-wrap: anywhere;
+            }
+            .history-row-details small {
+                color: #a6d8eb;
+                font-size: 0.68rem;
+            }
+            .history-row-details strong {
+                margin-top: 0.1rem;
+                color: #ffffff;
+                font-size: 0.82rem;
+                font-weight: 600;
+            }
+            .history-row-divider {
+                height: 1px;
+                margin: 0.1rem 0 0.35rem;
+                background: rgba(107, 191, 209, 0.27);
             }
             .history-card-grade {
                 flex: 0 0 auto;
-                padding: 0.35rem 0.6rem;
+                padding: 0.28rem 0.55rem;
                 background: #176b8a;
                 border: 1px solid #6bbfd1;
                 border-radius: 999px;
                 color: #ffffff;
-                font-size: 0.78rem;
+                font-size: 0.75rem;
                 font-weight: 800;
             }
-            .history-card-grid {
-                display: grid;
-                grid-template-columns: repeat(4, minmax(0, 1fr));
-                gap: 0.45rem;
-                margin-top: 0.8rem;
-            }
-            .history-card-grid div {
-                min-width: 0;
-                padding: 0.45rem 0.55rem;
-                background: rgba(13, 49, 83, 0.78);
-                border-radius: 7px;
-            }
-            .history-card-grid span,
-            .history-card-grid strong {
-                display: block;
-                overflow-wrap: anywhere;
-            }
-            .history-card-grid span { color: #a6d8eb; font-size: 0.66rem; }
-            .history-card-grid strong { margin-top: 0.15rem; color: #ffffff; font-size: 0.78rem; }
-            @media (max-width: 768px) {
-                .history-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            @media (max-width: 380px) {
+                [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"] {
+                    flex-direction: column !important;
+                    align-items: stretch !important;
+                }
+                [class*="st-key-history_row_"] [data-testid="stColumn"] {
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    flex: 1 1 100% !important;
+                }
+                [class*="st-key-history_preview_"] { max-width: 250px; }
             }
             [data-testid="stTabs"] {
                 margin: 0.35rem 0 1.1rem !important;
