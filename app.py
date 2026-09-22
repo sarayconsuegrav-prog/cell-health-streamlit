@@ -3503,23 +3503,29 @@ def main() -> None:
                 display: none !important;
             }
             /* Navegación principal: una fila de pastillas oscura, sin paneles
-               blancos, coherente con la paleta de la aplicación. */
-            [data-testid="stPills"] {
+               blancos, coherente con la paleta de la aplicación. Streamlit la
+               renderiza como un grupo de radios cuando se usa `st.pills`. */
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] {
+                margin: 0 0 1rem !important;
+            }
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] > [data-testid="stButtonGroup"] {
                 display: flex !important;
                 align-items: center !important;
                 min-height: 2.85rem;
-                margin: 0 0 1rem !important;
                 padding: 0.3rem 0.45rem !important;
                 background: #0a2745 !important;
                 border: 1px solid #2c8396 !important;
                 border-radius: 13px !important;
                 box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
             }
-            [data-testid="stPills"] [data-testid="stButtonGroup"] {
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radiogroup"] {
+                display: flex !important;
                 width: 100% !important;
-                background: transparent !important;
+                justify-content: center !important;
+                gap: 0.2rem !important;
             }
-            [data-testid="stPills"] [data-testid="stButtonGroup"] button {
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radio"] {
+                flex: 0 1 auto !important;
                 min-height: 2.25rem !important;
                 padding: 0.48rem 0.95rem !important;
                 border-color: transparent !important;
@@ -3529,15 +3535,15 @@ def main() -> None:
                 -webkit-text-fill-color: #c8eaf4 !important;
                 box-shadow: none !important;
             }
-            [data-testid="stPills"] [data-testid="stButtonGroup"] button:hover,
-            [data-testid="stPills"] [data-testid="stButtonGroup"] button:focus-visible,
-            [data-testid="stPills"] [data-testid="stButtonGroup"] button[aria-pressed="true"] {
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radio"]:hover,
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radio"]:focus-visible,
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radio"][aria-checked="true"] {
                 background: #176b8a !important;
                 border-color: #6bbfd1 !important;
                 color: #ffffff !important;
                 -webkit-text-fill-color: #ffffff !important;
             }
-            [data-testid="stPills"] [data-testid="stButtonGroup"] button * {
+            [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radio"] * {
                 color: inherit !important;
                 -webkit-text-fill-color: inherit !important;
             }
@@ -3599,12 +3605,14 @@ def main() -> None:
                 .app-header-side { display: none; }
                 .app-title { font-size: 1.85rem !important; }
                 .app-subtitle { font-size: 0.8rem !important; }
-                [data-testid="stPills"] {
+                [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] > [data-testid="stButtonGroup"] {
                     overflow-x: auto !important;
                     scrollbar-width: none;
                 }
-                [data-testid="stPills"]::-webkit-scrollbar { display: none; }
-                [data-testid="stPills"] [data-testid="stButtonGroup"] {
+                [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] > [data-testid="stButtonGroup"]::-webkit-scrollbar {
+                    display: none;
+                }
+                [data-testid="stElementContainer"][class*="st-key-analysis_model_mode"] [role="radiogroup"] {
                     width: max-content !important;
                     min-width: 100% !important;
                 }
