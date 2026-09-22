@@ -1904,9 +1904,6 @@ def render_live_metrics_panel(
                 f"{snapshot['processed_frames']:,} inferidos"
             )
 
-        if not snapshot["detection_active"] and snapshot["camera_frames"] > 0:
-            st.caption(f"Cámara activa · {snapshot['camera_frames']:,} fotogramas recibidos")
-
         if detection_requested and snapshot["camera_frames"] == 0:
             st.warning(
                 "La cámara todavía no entrega fotogramas. Autoriza el acceso en el navegador "
@@ -2411,7 +2408,7 @@ def render_live_camera(
             on_click=toggle_live_camera,
         )
 
-    camera_column, status_column = st.columns([1.55, 1.45], gap="large")
+    camera_column, status_column = st.columns([1.55, 1.15], gap="large")
     with camera_column:
         # WebRTC se encarga de transportar y pintar el video a la frecuencia
         # de la cámara. Streamlit no debe reconstruir una imagen JPEG en cada
@@ -2453,7 +2450,6 @@ def render_live_camera(
             st.session_state["live_camera_playing"] = camera_playing
             if camera_playing:
                 st.session_state.pop("live_camera_start_required", None)
-                st.caption("Cámara activa · usa el botón superior para detenerla.")
             else:
                 st.info("Conectando cámara… si Chrome solicita permiso, selecciona Permitir.")
         else:
@@ -2800,6 +2796,75 @@ def main() -> None:
             [data-testid="stSelectbox"] [data-baseweb="select"] svg {
                 fill: #c4fffa !important;
             }
+            /* Pestañas de navegación: el estado activo y el hover conservan
+               el mismo contraste que el resto de la interfaz. */
+            [data-testid="stTabs"] [role="tablist"] {
+                gap: 0.35rem;
+                border-bottom: 1px solid #2c8396;
+            }
+            [data-testid="stTabs"] button[role="tab"] {
+                background: #0d3153 !important;
+                border: 1px solid #2c8396 !important;
+                border-bottom: 3px solid transparent !important;
+                border-radius: 8px 8px 0 0 !important;
+                color: #c8eaf4 !important;
+                -webkit-text-fill-color: #c8eaf4 !important;
+                font-weight: 750 !important;
+                padding: 0.55rem 1rem !important;
+            }
+            [data-testid="stTabs"] button[role="tab"]:hover,
+            [data-testid="stTabs"] button[role="tab"]:focus-visible,
+            [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+                background: #176b8a !important;
+                background-color: #176b8a !important;
+                border-color: #c4fffa !important;
+                border-bottom-color: #c4fffa !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+                outline: none !important;
+            }
+            [data-testid="stTabs"] button[role="tab"] * {
+                color: inherit !important;
+                -webkit-text-fill-color: inherit !important;
+            }
+            [data-testid="stTabs"] [data-baseweb="tab-panel"] {
+                padding-top: 0.85rem !important;
+            }
+            /* Expanders usan una regla BaseWeb propia que, sin esta
+               sobreescritura, vuelve a pintar el encabezado de blanco. */
+            [data-testid="stExpander"] {
+                background: #0a2745 !important;
+                border: 1px solid #2c8396 !important;
+                border-radius: 10px !important;
+            }
+            [data-testid="stExpander"] details,
+            [data-testid="stExpander"] summary {
+                background: #0d3153 !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            [data-testid="stExpander"] summary {
+                border-radius: 9px !important;
+                padding: 0.65rem 0.8rem !important;
+            }
+            [data-testid="stExpander"] summary:hover,
+            [data-testid="stExpander"] details[open] summary {
+                background: #176b8a !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            [data-testid="stExpander"] summary * {
+                color: inherit !important;
+                -webkit-text-fill-color: inherit !important;
+            }
+            [data-testid="stExpander"] summary svg {
+                fill: #c4fffa !important;
+                color: #c4fffa !important;
+            }
+            [data-testid="stExpander"] details > div {
+                background: #061a33 !important;
+                color: #ffffff !important;
+            }
             [data-baseweb="popover"] [role="listbox"],
             [data-baseweb="popover"] [role="option"] {
                 background: #0d3153 !important;
@@ -2885,11 +2950,12 @@ def main() -> None:
             /* El video debe permanecer en WebRTC: así conserva la frecuencia
                de la cámara y no depende de reruns del WebSocket de Streamlit. */
             [data-testid="stCustomComponentV1"] {
-                width: 100% !important;
+                width: min(100%, 32rem) !important;
+                max-width: 32rem !important;
                 min-height: 24rem !important;
                 height: auto !important;
                 overflow: visible !important;
-                margin: 0 !important;
+                margin: 0.75rem auto 0 !important;
                 padding: 0 !important;
             }
             [data-testid="stCustomComponentV1"] iframe {
@@ -2986,12 +3052,14 @@ def main() -> None:
             .live-sample-cards {
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 0.65rem;
+                max-width: 27rem;
+                gap: 0.45rem;
                 margin-top: 0.7rem;
+                margin-left: auto;
             }
             .live-sample-card {
                 min-width: 0;
-                padding: 0.75rem;
+                padding: 0.6rem;
                 background: #0d3153;
                 border: 1px solid rgba(107, 191, 209, 0.62);
                 border-radius: 10px;
@@ -3024,7 +3092,7 @@ def main() -> None:
             .live-card-grid {
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 0.38rem;
+                gap: 0.3rem;
             }
             .live-card-grid div {
                 display: flex;
@@ -3057,9 +3125,9 @@ def main() -> None:
                 text-align: right;
             }
             .live-card-measurements {
-                margin-top: 0.45rem;
+                margin-top: 0.35rem;
                 color: #e8ffff;
-                font-size: 0.65rem;
+                font-size: 0.61rem;
                 line-height: 1.35;
             }
             .live-empty-metrics {
@@ -3329,144 +3397,147 @@ def main() -> None:
             st.stop()
         return loaded_model
 
-    analysis_mode = st.radio(
-        "Modo de análisis",
-        ["Foto", "Video"],
-        horizontal=True,
-        key="analysis_mode",
-    )
-    if analysis_mode == "Foto":
-        render_photo_mode(
-            None,
-            confidence,
-            image_size,
-            mask_opacity,
+    def render_uploaded_video_mode() -> None:
+        """Renderiza el análisis de un archivo de video dentro de su pestaña."""
+        uploaded_video = st.file_uploader(
+            "Carga un video para analizar",
+            type=["mp4", "avi", "mov", "mkv"],
+            key="uploaded_video_file",
+        )
+        if uploaded_video is None:
+            st.info("Cuando tengas el video, súbelo aquí y presiona **Analizar y reproducir detección**.")
+            return
+
+        video_display = st.selectbox(
+            "Visualización del video",
+            ["Con máscaras", "Sin máscaras"],
+            key="video_display",
+        )
+        show_video_masks = video_display == "Con máscaras"
+        if not st.button("Analizar y reproducir detección", type="primary", use_container_width=True):
+            return
+
+        model = get_app_model()
+
+        st.subheader("Detección en curso")
+        st.caption(
+            "El video original se muestra con las máscaras superpuestas mientras se analiza."
+            if show_video_masks
+            else "El video original se muestra mientras se analiza y se realiza el conteo."
+        )
+        preview_placeholder = st.empty()
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+        try:
+            video_masks, counts, tracked_detections, video_measurements = process_video(
+                model,
+                uploaded_video,
+                confidence,
+                VIDEO_IMAGE_SIZE,
+                mask_opacity,
+                VIDEO_INFERENCE_STRIDE,
+                show_video_masks,
+                progress_bar,
+                status_text,
+                preview_placeholder,
+            )
+        except Exception as error:
+            progress_bar.empty()
+            status_text.empty()
+            gc.collect()
+            st.exception(error)
+            return
+
+        # Al terminar se retira la previsualización temporal: queda un solo video final.
+        preview_placeholder.empty()
+        status_text.success("Análisis terminado.")
+        affected_percentage, grade, description = show_summary(
+            counts,
             low_limit,
             medium_limit,
             high_limit,
-            model_loader=get_app_model,
-        )
-        return
-
-    video_section = st.radio(
-        "Sección de video", ["Cámara en vivo", "Subir video"], horizontal=True, key="video_section"
-    )
-    if video_section == "Cámara en vivo":
-        # La carga/compilación de OpenVINO se inicia en segundo plano después
-        # de pulsar «Iniciar detección». La vista WebRTC debe seguir dibujándose
-        # para que capture fotogramas desde el primer clic.
-        model = st.session_state.get("cell_model")
-
-        def load_live_model_for_session() -> YOLO:
-            return load_live_model(model_path)
-
-        render_live_camera(
-            model,
-            confidence,
-            mask_opacity,
-            model_loader=load_live_model_for_session,
-        )
-        return
-
-    uploaded_video = st.file_uploader("Carga un video para analizar", type=["mp4", "avi", "mov", "mkv"])
-    if uploaded_video is None:
-        st.info("Cuando tengas el video, súbelo aquí y presiona **Analizar y reproducir detección**.")
-        return
-
-    video_display = st.selectbox(
-        "Visualización del video",
-        ["Con máscaras", "Sin máscaras"],
-        key="video_display",
-    )
-    show_video_masks = video_display == "Con máscaras"
-    if not st.button("Analizar y reproducir detección", type="primary", use_container_width=True):
-        return
-
-    model = get_app_model()
-
-    st.subheader("Detección en curso")
-    st.caption(
-        "El video original se muestra con las máscaras superpuestas mientras se analiza."
-        if show_video_masks
-        else "El video original se muestra mientras se analiza y se realiza el conteo."
-    )
-    preview_placeholder = st.empty()
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
-    try:
-        video_masks, counts, tracked_detections, video_measurements = process_video(
-            model,
-            uploaded_video,
-            confidence,
-            VIDEO_IMAGE_SIZE,
-            mask_opacity,
-            VIDEO_INFERENCE_STRIDE,
-            show_video_masks,
-            progress_bar,
-            status_text,
-            preview_placeholder,
-        )
-    except Exception as error:
-        progress_bar.empty()
-        status_text.empty()
-        gc.collect()
-        st.exception(error)
-        return
-
-    # Al terminar se retira la previsualización temporal: queda un solo video final.
-    preview_placeholder.empty()
-    status_text.success("Análisis terminado.")
-    affected_percentage, grade, description = show_summary(
-        counts,
-        low_limit,
-        medium_limit,
-        high_limit,
-        "Total de células únicas",
-        sidebar=True,
-        measurements=video_measurements,
-    )
-    if tracked_detections == 0:
-        st.warning("No se obtuvieron identificadores de seguimiento; revisa la confianza, el video y el modelo.")
-
-    st.subheader("Video original con máscaras" if show_video_masks else "Video original")
-    st.video(video_masks, format="video/mp4")
-    download_video, download_report = st.columns(2)
-    with download_video:
-        st.download_button(
-            "Descargar video con máscaras" if show_video_masks else "Descargar video original",
-            data=video_masks,
-            file_name="celulas_con_mascaras.mp4" if show_video_masks else "video_original.mp4",
-            mime="video/mp4",
-            use_container_width=True,
-        )
-    with download_report:
-        report = make_report_csv(
-            counts,
-            affected_percentage,
-            grade,
-            description,
-            "Total de células únicas rastreadas",
+            "Total de células únicas",
+            sidebar=True,
             measurements=video_measurements,
         )
-        st.download_button(
-            "Descargar reporte CSV",
-            data=report,
-            file_name="reporte_celular.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        if tracked_detections == 0:
+            st.warning("No se obtuvieron identificadores de seguimiento; revisa la confianza, el video y el modelo.")
 
-    st.caption(
-        "El conteo corresponde a IDs únicos seguidos a lo largo del video. "
-        "La calificación debe validarse con tu criterio científico o clínico."
-    )
-    if video_measurements:
+        st.subheader("Video original con máscaras" if show_video_masks else "Video original")
+        st.video(video_masks, format="video/mp4")
+        download_video, download_report = st.columns(2)
+        with download_video:
+            st.download_button(
+                "Descargar video con máscaras" if show_video_masks else "Descargar video original",
+                data=video_masks,
+                file_name="celulas_con_mascaras.mp4" if show_video_masks else "video_original.mp4",
+                mime="video/mp4",
+                use_container_width=True,
+            )
+        with download_report:
+            report = make_report_csv(
+                counts,
+                affected_percentage,
+                grade,
+                description,
+                "Total de células únicas rastreadas",
+                measurements=video_measurements,
+            )
+            st.download_button(
+                "Descargar reporte CSV",
+                data=report,
+                file_name="reporte_celular.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
         st.caption(
-            "Las medidas promedio se calcularon con las máscaras de los fotogramas analizados "
-            f"({video_measurements['calibration_method']})."
+            "El conteo corresponde a IDs únicos seguidos a lo largo del video. "
+            "La calificación debe validarse con tu criterio científico o clínico."
         )
-    del video_masks
-    gc.collect()
+        if video_measurements:
+            st.caption(
+                "Las medidas promedio se calcularon con las máscaras de los fotogramas analizados "
+                f"({video_measurements['calibration_method']})."
+            )
+
+    model_tab, vacuolization_tab = st.tabs(
+        ["Detección de mancha blanca", "Modelo de vacuolización"]
+    )
+    with model_tab:
+        photo_tab, video_tab = st.tabs(["Foto", "Video"])
+        with photo_tab:
+            render_photo_mode(
+                None,
+                confidence,
+                image_size,
+                mask_opacity,
+                low_limit,
+                medium_limit,
+                high_limit,
+                model_loader=get_app_model,
+            )
+        with video_tab:
+            live_camera_tab, uploaded_video_tab = st.tabs(["Cámara en vivo", "Subir video"])
+            with live_camera_tab:
+                # La carga/compilación de OpenVINO se inicia en segundo plano después
+                # de pulsar «Iniciar detección». La vista WebRTC debe seguir dibujándose
+                # para que capture fotogramas desde el primer clic.
+                model = st.session_state.get("cell_model")
+
+                def load_live_model_for_session() -> YOLO:
+                    return load_live_model(model_path)
+
+                render_live_camera(
+                    model,
+                    confidence,
+                    mask_opacity,
+                    model_loader=load_live_model_for_session,
+                )
+            with uploaded_video_tab:
+                render_uploaded_video_mode()
+    with vacuolization_tab:
+        st.info("El modelo de vacuolización se incorporará en esta pestaña.")
 
 
 if __name__ == "__main__":
