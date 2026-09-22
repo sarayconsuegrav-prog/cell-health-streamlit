@@ -87,6 +87,8 @@ VIDEO_INFERENCE_STRIDE = 2
 VIDEO_OUTPUT_MAX_WIDTH = 1280
 LIVE_INFERENCE_RETRY_SECONDS = 2.0
 LIVE_RECORD_EVERY_N_FRAMES = 2
+LIVE_TRACKER_CONFIG = APP_DIR / "trackers" / "live_botsort.yaml"
+LIVE_TRACK_MIN_OBSERVATIONS = 2
 # Las mediciones se usan para promedios; conservar cada observación de cada
 # fotograma puede hacer crecer la RAM sin mejorar de forma apreciable el reporte.
 MAX_MEASUREMENT_OBSERVATIONS = 2000
@@ -989,15 +991,18 @@ def draw_live_status_overlay(
     badge_color = (40, 40, 220)  # rojo en BGR
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.48, min(0.82, width / 1500))
+    # Escalar junto con la resolución de entrada para que el rótulo conserve
+    # prácticamente el mismo tamaño entre 480p, HD y Full HD.
+    display_scale = max(width / 640.0, 0.75)
+    font_scale = 0.32 * display_scale
     thickness = max(1, round(font_scale * 2))
     (text_width, text_height), baseline = cv2.getTextSize(
         label, font, font_scale, thickness
     )
-    left = max(12, round(width * 0.018))
-    top = max(12, round(height * 0.028))
-    padding_x = max(10, round(width * 0.012))
-    padding_y = max(8, round(height * 0.012))
+    left = max(8, round(8 * display_scale))
+    top = max(8, round(8 * display_scale))
+    padding_x = max(5, round(7 * display_scale))
+    padding_y = max(4, round(5 * display_scale))
     badge_height = text_height + baseline + padding_y * 2
     badge_width = text_width + padding_x * 3 + round(badge_height * 0.35)
     right = min(width - 8, left + badge_width)
@@ -1031,15 +1036,24 @@ def update_track_votes(result: Any, votes: dict[int, Counter], model_names: dict
     track_ids = result.boxes.id.int().cpu().tolist()
     class_ids = result.boxes.cls.int().cpu().tolist()
     for track_id, class_id in zip(track_ids, class_ids):
+        # Ultralytics puede emitir -1 para detecciones sin identidad asignada;
+        # no deben fusionarse entre sí ni aumentar el conteo acumulado.
+        if int(track_id) < 0:
+            continue
         class_name = model_names.get(int(class_id), str(class_id))
         votes[int(track_id)][normalize_class_name(class_name)] += 1
-    return len(track_ids)
+    return sum(int(track_id) >= 0 for track_id in track_ids)
 
 
-def summarize_tracks(votes: dict[int, Counter]) -> dict[str, int]:
-    """Da a cada célula la clase que recibió en más fotogramas."""
+def summarize_tracks(
+    votes: dict[int, Counter],
+    min_observations: int = 1,
+) -> dict[str, int]:
+    """Cuenta IDs confirmados según la clase observada en más fotogramas."""
     counts = Counter()
     for class_votes in votes.values():
+        if sum(class_votes.values()) < min_observations:
+            continue
         category, _ = class_votes.most_common(1)[0]
         counts[category] += 1
     return {
@@ -1263,7 +1277,12 @@ class LiveSessionState:
             "processed_frames": self.processed_frames,
             "recorded_frames": self.recorded_frames,
             "recording_path": str(self.recording_path) if self.recording_path else "",
-            "counts": dict(summarize_tracks(self.track_votes)),
+            "counts": dict(
+                summarize_tracks(
+                    self.track_votes,
+                    min_observations=LIVE_TRACK_MIN_OBSERVATIONS,
+                )
+            ),
             "measurements": dict(measurements) if measurements is not None else None,
         }
         self.sample_ready = True
@@ -1387,7 +1406,10 @@ class LiveSessionState:
                 processed_frames = int(pending_sample["processed_frames"])
                 recorded_frames = int(pending_sample["recorded_frames"])
             else:
-                counts = summarize_tracks(self.track_votes)
+                counts = summarize_tracks(
+                    self.track_votes,
+                    min_observations=LIVE_TRACK_MIN_OBSERVATIONS,
+                )
                 measurements = (
                     summarize_measurement_samples(self.measurement_samples, self.calibration)
                     if self.calibration is not None
@@ -2929,7 +2951,8 @@ def render_live_metrics_panel(
                 else "Muestra detenida"
             )
             st.caption(
-                f"{status} · {snapshot['captured_frames']:,} fotogramas capturados · "
+                f"{status} · {counts['total']:,} células únicas confirmadas · "
+                f"{snapshot['captured_frames']:,} fotogramas capturados · "
                 f"{snapshot['processed_frames']:,} inferidos"
             )
 
@@ -3302,7 +3325,7 @@ def render_live_camera(
                     imgsz=resolution["inference_size"],
                     retina_masks=True,
                     persist=True,
-                    tracker="bytetrack.yaml",
+                    tracker=str(LIVE_TRACKER_CONFIG),
                     verbose=False,
                 )
             if not results:
@@ -4004,10 +4027,10 @@ def main() -> None:
             /* El video debe permanecer en WebRTC: así conserva la frecuencia
                de la cámara y no depende de reruns del WebSocket de Streamlit. */
             [data-testid="stCustomComponentV1"] {
-                width: min(100%, 32rem) !important;
-                max-width: 32rem !important;
+                width: min(100%, 27rem) !important;
+                max-width: 27rem !important;
                 min-height: 24rem !important;
-                height: auto !important;
+                height: 24rem !important;
                 overflow: visible !important;
                 margin: 0.75rem auto 0 !important;
                 padding: 0 !important;
@@ -4017,7 +4040,8 @@ def main() -> None:
                 position: relative !important;
                 width: 100% !important;
                 min-height: 24rem !important;
-                height: 30rem !important;
+                max-height: 24rem !important;
+                height: 24rem !important;
                 border: 0 !important;
             }
             .live-preview {
