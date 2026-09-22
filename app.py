@@ -2802,7 +2802,7 @@ def main() -> None:
                 gap: 0.35rem;
                 border-bottom: 1px solid #2c8396;
             }
-            [data-testid="stTabs"] button[role="tab"] {
+            [data-testid="stTabs"] [role="tab"] {
                 background: #0d3153 !important;
                 border: 1px solid #2c8396 !important;
                 border-bottom: 3px solid transparent !important;
@@ -2812,9 +2812,9 @@ def main() -> None:
                 font-weight: 750 !important;
                 padding: 0.55rem 1rem !important;
             }
-            [data-testid="stTabs"] button[role="tab"]:hover,
-            [data-testid="stTabs"] button[role="tab"]:focus-visible,
-            [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+            [data-testid="stTabs"] [role="tab"]:hover,
+            [data-testid="stTabs"] [role="tab"]:focus-visible,
+            [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
                 background: #176b8a !important;
                 background-color: #176b8a !important;
                 border-color: #c4fffa !important;
@@ -2823,7 +2823,7 @@ def main() -> None:
                 -webkit-text-fill-color: #ffffff !important;
                 outline: none !important;
             }
-            [data-testid="stTabs"] button[role="tab"] * {
+            [data-testid="stTabs"] [role="tab"] * {
                 color: inherit !important;
                 -webkit-text-fill-color: inherit !important;
             }
