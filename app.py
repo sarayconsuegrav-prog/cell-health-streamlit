@@ -3347,91 +3347,71 @@ def main() -> None:
             }
             .app-header {
                 position: relative;
-                display: flex;
-                align-items: flex-end;
+                display: grid;
+                grid-template-columns: minmax(0, 1.45fr) minmax(12rem, 0.55fr);
+                align-items: stretch;
                 gap: 1rem;
                 margin: 0 0 1.15rem;
                 padding: 1.2rem 1.35rem 1.25rem;
                 overflow: hidden;
-                background: linear-gradient(135deg, #0a2745 0%, #103858 62%, #0e5068 100%);
-                border: 1px solid rgba(107, 191, 209, 0.46);
+                background: #0a2745;
+                border: 1px solid #2c8396;
                 border-radius: 18px;
                 box-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
             }
-            .app-header::after {
+            .app-header-copy { position: relative; z-index: 1; }
+            .app-header-side {
+                position: relative;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                min-height: 9rem;
+                padding: 0.9rem 1rem;
+                background: #103858;
+                border: 1px solid rgba(107, 191, 209, 0.48);
+                border-radius: 13px;
+                overflow: hidden;
+            }
+            .app-header-side::after {
                 content: "";
                 position: absolute;
-                width: 18rem;
-                height: 18rem;
-                right: -8rem;
-                top: -12rem;
-                border-radius: 50%;
-                background: rgba(65, 216, 204, 0.14);
+                inset: 0;
+                background-image: linear-gradient(rgba(166, 245, 240, 0.08) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(166, 245, 240, 0.08) 1px, transparent 1px);
+                background-size: 1.4rem 1.4rem;
+                mask-image: linear-gradient(to bottom, black, transparent 85%);
                 pointer-events: none;
             }
-            .app-header-copy { position: relative; z-index: 1; }
-            .app-topbar {
-                display: grid;
-                grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-                align-items: center;
-                gap: 1rem;
-                margin: 0 0 1rem;
-                padding: 0.58rem 0.8rem;
-                background: #f8fbfc;
-                border: 1px solid #dbe7ec;
-                border-radius: 14px;
-                box-shadow: 0 8px 22px rgba(0, 0, 0, 0.13);
-                color: #071a31;
-            }
-            .app-brand {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.55rem;
-                min-width: 0;
-                color: #071a31;
-                font-size: 0.96rem;
-                font-weight: 850;
-                letter-spacing: -0.02em;
-            }
-            .app-brand-mark {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 2rem;
-                height: 2rem;
-                flex: 0 0 auto;
-                border-radius: 0.65rem;
-                background: #071a31;
-                color: #c4fffa;
-                font-size: 0.65rem;
-                font-weight: 900;
-                letter-spacing: 0.04em;
-            }
-            .app-topbar-context {
-                color: #657486;
-                font-size: 0.72rem;
-                font-weight: 750;
-                letter-spacing: 0.08em;
-                text-transform: uppercase;
-                white-space: nowrap;
-            }
-            .app-topbar-actions {
-                display: inline-flex;
-                justify-self: end;
-                align-items: center;
-                gap: 0.4rem;
-                color: #0f7c86;
-                font-size: 0.76rem;
+            .app-header-side-label {
+                position: relative;
+                z-index: 1;
+                color: #a6f5f0;
+                font-size: 0.68rem;
                 font-weight: 800;
-                white-space: nowrap;
+                letter-spacing: 0.12em;
             }
-            .app-topbar-actions::before {
-                content: "";
-                width: 0.45rem;
-                height: 0.45rem;
-                border-radius: 50%;
-                background: #12b8c2;
-                box-shadow: 0 0 0 3px rgba(18, 184, 194, 0.16);
+            .app-header-side-title {
+                position: relative;
+                z-index: 1;
+                margin-top: 0.4rem;
+                color: #ffffff;
+                font-size: 1.15rem;
+                font-weight: 800;
+            }
+            .app-header-side-rule {
+                position: relative;
+                z-index: 1;
+                width: 4rem;
+                height: 0.2rem;
+                margin: 0.7rem 0;
+                border-radius: 999px;
+                background: #41d8cc;
+            }
+            .app-header-side-caption {
+                position: relative;
+                z-index: 1;
+                color: #c8eaf4;
+                font-size: 0.78rem;
             }
             .app-eyebrow {
                 margin-bottom: 0.38rem;
@@ -3514,42 +3494,52 @@ def main() -> None:
                 color: inherit !important;
                 -webkit-text-fill-color: inherit !important;
             }
-            /* La primera navegación adopta el patrón de barra superior de una
-               aplicación: clara, horizontal y con un activo muy visible. */
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) {
-                margin: 0 0 1.25rem !important;
+            /* Las pestañas usan el estado activo como pastilla; no dibujar
+               una línea inferior adicional. */
+            [data-testid="stTabs"] [role="tab"] {
+                border-bottom: 0 !important;
             }
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] {
-                justify-content: center !important;
-                gap: 0.15rem !important;
+            [data-testid="stTabs"] .react-aria-SelectionIndicator {
+                display: none !important;
+            }
+            /* Navegación principal: una fila de pastillas oscura, sin paneles
+               blancos, coherente con la paleta de la aplicación. */
+            [data-testid="stPills"] {
+                display: flex !important;
+                align-items: center !important;
+                min-height: 2.85rem;
+                margin: 0 0 1rem !important;
                 padding: 0.3rem 0.45rem !important;
-                background: #f8fbfc !important;
-                border: 1px solid #dbe7ec !important;
-                border-radius: 12px !important;
-                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12) !important;
+                background: #0a2745 !important;
+                border: 1px solid #2c8396 !important;
+                border-radius: 13px !important;
+                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
             }
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"] {
-                min-height: 2.35rem !important;
-                padding: 0.54rem 0.95rem !important;
+            [data-testid="stPills"] [data-testid="stButtonGroup"] {
+                width: 100% !important;
                 background: transparent !important;
-                border: 1px solid transparent !important;
-                border-radius: 8px !important;
-                color: #43556a !important;
-                -webkit-text-fill-color: #43556a !important;
-                font-size: 0.84rem !important;
             }
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:hover,
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"]:focus-visible,
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] > [role="tab"][aria-selected="true"] {
-                background: #dff6f3 !important;
-                border-color: #b3e6e1 !important;
-                color: #075d68 !important;
-                -webkit-text-fill-color: #075d68 !important;
+            [data-testid="stPills"] [data-testid="stButtonGroup"] button {
+                min-height: 2.25rem !important;
+                padding: 0.48rem 0.95rem !important;
+                border-color: transparent !important;
+                border-radius: 8px !important;
+                background: transparent !important;
+                color: #c8eaf4 !important;
+                -webkit-text-fill-color: #c8eaf4 !important;
                 box-shadow: none !important;
             }
-            [data-testid="stTabs"]:not([data-testid="stTabs"] [data-testid="stTabs"]):has([data-testid="stTabPanel"] [data-testid="stTabs"]) > div > [role="tablist"] .react-aria-SelectionIndicator {
-                background: #0f7c86 !important;
-                height: 0.18rem !important;
+            [data-testid="stPills"] [data-testid="stButtonGroup"] button:hover,
+            [data-testid="stPills"] [data-testid="stButtonGroup"] button:focus-visible,
+            [data-testid="stPills"] [data-testid="stButtonGroup"] button[aria-pressed="true"] {
+                background: #176b8a !important;
+                border-color: #6bbfd1 !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            [data-testid="stPills"] [data-testid="stButtonGroup"] button * {
+                color: inherit !important;
+                -webkit-text-fill-color: inherit !important;
             }
             [data-testid="stTabs"] [data-baseweb="tab-panel"] {
                 padding-top: 0.55rem !important;
@@ -3601,19 +3591,23 @@ def main() -> None:
                 }
                 .app-header {
                     align-items: flex-start;
+                    grid-template-columns: 1fr;
                     margin-bottom: 0.8rem;
                     padding: 1rem;
                     border-radius: 14px;
                 }
-                .app-topbar {
-                    grid-template-columns: 1fr auto;
-                    gap: 0.55rem;
-                    padding: 0.5rem 0.65rem;
-                }
-                .app-topbar-context { display: none; }
-                .app-topbar-actions { font-size: 0.7rem; }
+                .app-header-side { display: none; }
                 .app-title { font-size: 1.85rem !important; }
                 .app-subtitle { font-size: 0.8rem !important; }
+                [data-testid="stPills"] {
+                    overflow-x: auto !important;
+                    scrollbar-width: none;
+                }
+                [data-testid="stPills"]::-webkit-scrollbar { display: none; }
+                [data-testid="stPills"] [data-testid="stButtonGroup"] {
+                    width: max-content !important;
+                    min-width: 100% !important;
+                }
                 [data-testid="stTabs"] [role="tablist"] {
                     flex-wrap: nowrap !important;
                     overflow-x: auto !important;
@@ -3632,16 +3626,15 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
+    analysis_mode = st.pills(
+        "Sección principal",
+        ["Detección de mancha blanca", "Modelo de vacuolización"],
+        default="Detección de mancha blanca",
+        key="analysis_model_mode",
+        label_visibility="collapsed",
+    )
     st.markdown(
         """
-        <nav class="app-topbar" aria-label="Navegación de la aplicación">
-            <div class="app-brand">
-                <span class="app-brand-mark">CH</span>
-                <span>Cell Health</span>
-            </div>
-            <div class="app-topbar-context">Plataforma de análisis</div>
-            <div class="app-topbar-actions">Mancha blanca</div>
-        </nav>
         <header class="app-header">
             <div class="app-header-copy">
                 <div class="app-eyebrow">Análisis celular</div>
@@ -3649,6 +3642,12 @@ def main() -> None:
                 <p class="app-subtitle">
                     Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
                 </p>
+            </div>
+            <div class="app-header-side" aria-hidden="true">
+                <div class="app-header-side-label">FLUJO DE ANÁLISIS</div>
+                <div class="app-header-side-title">Imagen · detección · reporte</div>
+                <div class="app-header-side-rule"></div>
+                <div class="app-header-side-caption">Foto · video · cámara en vivo</div>
             </div>
         </header>
         """,
@@ -3813,10 +3812,7 @@ def main() -> None:
                 f"({video_measurements['calibration_method']})."
             )
 
-    model_tab, vacuolization_tab = st.tabs(
-        ["Detección de mancha blanca", "Modelo de vacuolización"]
-    )
-    with model_tab:
+    if analysis_mode == "Detección de mancha blanca":
         photo_tab, video_tab = st.tabs(["Foto", "Video"])
         with photo_tab:
             render_photo_mode(
@@ -3848,7 +3844,7 @@ def main() -> None:
                 )
             with uploaded_video_tab:
                 render_uploaded_video_mode()
-    with vacuolization_tab:
+    else:
         st.info("El modelo de vacuolización se incorporará en esta pestaña.")
 
 
