@@ -30,6 +30,7 @@ from threading import Lock, Thread
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -123,6 +124,8 @@ VACUOLIZATION_LABEL = "Vacuolización"
 HISTORY_LABEL = "Historial"
 HISTORY_STATE_KEY = "analysis_history"
 HISTORY_VIDEO_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "history_videos"
+HISTORY_VIDEO_PRESENTATION_VERSION = "timestamp-no-live-badge-v1"
+CAPTURE_TIMEZONE = ZoneInfo("America/Guayaquil")
 ONEDRIVE_SENT_BATCHES_KEY = "onedrive_sent_batches"
 EXCEL_HEADERS = ("Código", "Vacuolización", "White Spot (WSSV)")
 # OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
@@ -1028,6 +1031,105 @@ def draw_live_status_overlay(
     return output
 
 
+def draw_capture_timestamp(image: np.ndarray, timestamp: str) -> np.ndarray:
+    """Añade fecha y hora de captura en una franja legible, sin tapar el video."""
+    output = image.copy()
+    height, width = output.shape[:2]
+    label = str(timestamp or "").strip()
+    if not label or width < 80 or height < 40:
+        return output
+
+    display_scale = max(width / 640.0, 0.85)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.48 * display_scale
+    thickness = max(1, round(display_scale))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, font, font_scale, thickness
+    )
+    pad_x = max(6, round(9 * display_scale))
+    pad_y = max(4, round(6 * display_scale))
+    box_width = min(width - 12, text_width + pad_x * 2)
+    box_height = text_height + baseline + pad_y * 2
+    right = width - max(8, round(8 * display_scale))
+    left = max(6, right - box_width)
+    top = max(6, round(8 * display_scale))
+    bottom = min(height - 6, top + box_height)
+
+    background = output.copy()
+    cv2.rectangle(background, (left, top), (right, bottom), (5, 24, 47), -1)
+    output = cv2.addWeighted(background, 0.84, output, 0.16, 0)
+    cv2.rectangle(output, (left, top), (right, bottom), (107, 191, 209), 1, cv2.LINE_AA)
+    cv2.putText(
+        output,
+        label,
+        (left + pad_x, top + pad_y + text_height),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        lineType=cv2.LINE_AA,
+    )
+    return output
+
+
+def remove_legacy_live_badge(image: np.ndarray) -> np.ndarray:
+    """Limpia del video archivado la zona donde antes se incrustaba «EN VIVO»."""
+    height, width = image.shape[:2]
+    display_scale = max(width / 640.0, 0.75)
+    label = "EN VIVO"
+    font_scale = 0.32 * display_scale
+    thickness = max(1, round(font_scale * 2))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+    )
+    left = max(8, round(8 * display_scale))
+    top = max(8, round(8 * display_scale))
+    padding_x = max(5, round(7 * display_scale))
+    padding_y = max(4, round(5 * display_scale))
+    badge_height = text_height + baseline + padding_y * 2
+    badge_width = text_width + padding_x * 3 + round(badge_height * 0.35)
+    right = min(width - 8, left + badge_width)
+    bottom = min(height - 8, top + badge_height)
+    if right <= left or bottom <= top:
+        return image.copy()
+
+    badge_region = image[top:bottom, left:right]
+    red_pixels = (
+        (badge_region[:, :, 2] > 135)
+        & (badge_region[:, :, 2] > badge_region[:, :, 1] * 1.6)
+        & (badge_region[:, :, 2] > badge_region[:, :, 0] * 1.6)
+    )
+    # Evita retocar videos ajenos al antiguo flujo en vivo si en esa posición
+    # no existe la placa roja que incrustaba la versión anterior.
+    if np.count_nonzero(red_pixels) < max(
+        40,
+        round(badge_region.shape[0] * badge_region.shape[1] * 0.08),
+    ):
+        return image.copy()
+
+    margin = max(2, round(display_scale * 2))
+    x1, y1 = max(0, left - margin), max(0, top - margin)
+    x2, y2 = min(width, right + margin + 1), min(height, bottom + margin + 1)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.rectangle(mask, (x1, y1), (x2 - 1, y2 - 1), 255, -1)
+    return cv2.inpaint(
+        image,
+        mask,
+        max(3, round(display_scale * 4)),
+        cv2.INPAINT_TELEA,
+    )
+
+
+def format_capture_timestamp(value: datetime | None = None) -> str:
+    """Formatea la fecha de captura con la zona horaria de Ecuador continental."""
+    captured_at = value or datetime.now(CAPTURE_TIMEZONE)
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=CAPTURE_TIMEZONE)
+    else:
+        captured_at = captured_at.astimezone(CAPTURE_TIMEZONE)
+    return captured_at.strftime("%d/%m/%Y %H:%M")
+
+
 def update_track_votes(result: Any, votes: dict[int, Counter], model_names: dict[int, str]) -> int:
     """Registra la clase observada para cada ID único producido por el tracker."""
     if result.boxes is None or result.boxes.id is None:
@@ -1154,6 +1256,7 @@ class LiveSessionState:
     recording_writer: Any | None = None
     recording_path: Path | None = None
     recording_size: tuple[int, int] | None = None
+    recording_started_at: datetime | None = None
     recorded_frames: int = 0
     track_votes: dict[int, Counter] = field(default_factory=lambda: defaultdict(Counter))
     measurement_track_ids: set[int] = field(default_factory=set)
@@ -1187,9 +1290,10 @@ class LiveSessionState:
         self.recording_size = None
 
     def record_frame(self, frame: np.ndarray, fps: float) -> None:
-        """Escribe el fotograma mostrado en un MP4 temporal de baja carga."""
+        """Graba una copia con hora fija de captura, sin la placa «EN VIVO»."""
         with self.lock:
             if self.recording_writer is None:
+                self.recording_started_at = datetime.now(CAPTURE_TIMEZONE)
                 recording_file = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 self.recording_path = Path(recording_file.name)
                 recording_file.close()
@@ -1215,6 +1319,10 @@ class LiveSessionState:
                     interpolation=cv2.INTER_AREA,
                 )
             try:
+                timestamp = format_capture_timestamp(
+                    getattr(self, "recording_started_at", None)
+                )
+                output_frame = draw_capture_timestamp(output_frame, timestamp)
                 self.recording_writer.write(output_frame)
                 self.recorded_frames += 1
             except Exception as error:
@@ -1224,6 +1332,7 @@ class LiveSessionState:
         """Limpia el conteo al iniciar una nueva captura."""
         with self.lock:
             self._close_recording_locked(delete_file=True)
+            self.recording_started_at = None
             self.frame_number = 0
             self.camera_frames = 0
             self.captured_frames = 0
@@ -1277,6 +1386,9 @@ class LiveSessionState:
             "processed_frames": self.processed_frames,
             "recorded_frames": self.recorded_frames,
             "recording_path": str(self.recording_path) if self.recording_path else "",
+            "captured_at": format_capture_timestamp(
+                getattr(self, "recording_started_at", None)
+            ),
             "counts": dict(
                 summarize_tracks(
                     self.track_votes,
@@ -1334,6 +1446,9 @@ class LiveSessionState:
                     "processed_frames": pending_sample["processed_frames"],
                     "recorded_frames": pending_sample["recorded_frames"],
                     "recording_path": pending_sample["recording_path"],
+                    "captured_at": pending_sample.get(
+                        "captured_at", format_capture_timestamp()
+                    ),
                     "counts": dict(pending_sample["counts"]),
                     "measurements": (
                         dict(pending_sample["measurements"])
@@ -1346,6 +1461,7 @@ class LiveSessionState:
             # siguiente análisis solo podrá borrar su propio archivo temporal.
             self.recording_path = None
             self.recording_size = None
+            self.recording_started_at = None
             self.frame_number = 0
             self.captured_frames = 0
             self.processed_frames = 0
@@ -1509,8 +1625,14 @@ def _video_path_is_ready(path: str | Path) -> bool:
         return False
 
 
-def _transcode_video_for_browser(source_path: Path, destination_path: Path) -> bool:
-    """Convierte el MP4 temporal a H.264 para que el reproductor HTML5 lo abra."""
+def _transcode_video_for_browser(
+    source_path: Path,
+    destination_path: Path,
+    *,
+    timestamp_text: str = "",
+    remove_live_badge: bool = False,
+) -> bool:
+    """Convierte a H.264 y, si se pide, adapta el video para el historial."""
     try:
         import av
     except ImportError:
@@ -1558,11 +1680,26 @@ def _transcode_video_for_browser(source_path: Path, destination_path: Path) -> b
         frame_number = 0
         for packet in input_container.demux(input_stream):
             for frame in packet.decode():
-                converted = frame.reformat(
-                    format="yuv420p",
-                    width=width,
-                    height=height,
-                )
+                if timestamp_text or remove_live_badge:
+                    bgr_frame = frame.to_ndarray(format="bgr24")[:height, :width].copy()
+                    if remove_live_badge:
+                        bgr_frame = remove_legacy_live_badge(bgr_frame)
+                    if timestamp_text:
+                        bgr_frame = draw_capture_timestamp(bgr_frame, timestamp_text)
+                    converted = av.VideoFrame.from_ndarray(
+                        bgr_frame,
+                        format="bgr24",
+                    ).reformat(
+                        format="yuv420p",
+                        width=width,
+                        height=height,
+                    )
+                else:
+                    converted = frame.reformat(
+                        format="yuv420p",
+                        width=width,
+                        height=height,
+                    )
                 converted.pts = frame_number
                 converted.time_base = Fraction(1, frame_rate)
                 for encoded_packet in output_stream.encode(converted):
@@ -1613,6 +1750,76 @@ def persist_history_video(source_path: str | Path, history_id: str) -> str:
         return str(source)
 
 
+def _history_timestamp_text(record: dict[str, Any], source_path: Path) -> str:
+    """Obtiene la fecha del registro o la fecha del archivo como respaldo."""
+    raw_value = str(record.get("captured_at") or "").strip()
+    for date_format in (
+        "%d/%m/%Y · %H:%M",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            captured_at = datetime.strptime(raw_value, date_format)
+            return format_capture_timestamp(captured_at)
+        except ValueError:
+            continue
+    try:
+        modified_at = datetime.fromtimestamp(
+            source_path.stat().st_mtime,
+            tz=CAPTURE_TIMEZONE,
+        )
+    except OSError:
+        modified_at = datetime.now(CAPTURE_TIMEZONE)
+    return format_capture_timestamp(modified_at)
+
+
+def _ensure_history_video_presentation(
+    record: dict[str, Any],
+    source_path: Path,
+) -> Path:
+    """Crea una versión de reproducción sin «EN VIVO» y con fecha/hora."""
+    if record.get("video_presentation_version") == HISTORY_VIDEO_PRESENTATION_VERSION:
+        return source_path
+    if not _video_path_is_ready(source_path):
+        return source_path
+    if record.get("video_presentation_attempted"):
+        return source_path
+
+    history_id = str(record.get("history_id") or "").strip()
+    if not history_id:
+        history_id = "|".join(
+            (
+                str(source_path),
+                str(record.get("sample_code") or ""),
+                str(record.get("captured_at") or ""),
+            )
+        )
+    video_key = hashlib.sha256(history_id.encode("utf-8")).hexdigest()[:24]
+    destination = HISTORY_VIDEO_ROOT / (
+        f"{video_key}-{HISTORY_VIDEO_PRESENTATION_VERSION}.mp4"
+    )
+    try:
+        HISTORY_VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+        if not _video_path_is_ready(destination):
+            timestamp_text = _history_timestamp_text(record, source_path)
+            if not _transcode_video_for_browser(
+                source_path,
+                destination,
+                timestamp_text=timestamp_text,
+                remove_live_badge=True,
+            ):
+                record["video_presentation_attempted"] = True
+                return source_path
+        record.setdefault("original_recording_path", str(source_path))
+        record["recording_path"] = str(destination)
+        record["video_presentation_version"] = HISTORY_VIDEO_PRESENTATION_VERSION
+        record.pop("video_presentation_attempted", None)
+        return destination
+    except OSError:
+        record["video_presentation_attempted"] = True
+        return source_path
+
+
 def history_video_path(record: dict[str, Any]) -> Path:
     """Obtiene el video del historial y migra registros antiguos si aún existen."""
     recording_value = str(record.get("recording_path") or "").strip()
@@ -1621,6 +1828,7 @@ def history_video_path(record: dict[str, Any]) -> Path:
     source_path = Path(source_value) if source_value else recording_path
     history_id = str(record.get("history_id") or "history-video")
 
+    resolved_path = recording_path
     if _video_path_is_ready(recording_path):
         # Los registros creados antes de esta mejora apuntan directamente al
         # archivo temporal. Se copian una sola vez a la carpeta del historial.
@@ -1629,16 +1837,17 @@ def history_video_path(record: dict[str, Any]) -> Path:
             if stable_path and stable_path != recording_value:
                 record["source_recording_path"] = recording_value
                 record["recording_path"] = stable_path
-                return Path(stable_path)
-        return recording_path
+                resolved_path = Path(stable_path)
 
-    if _video_path_is_ready(source_path):
+    elif _video_path_is_ready(source_path):
         stable_path = persist_history_video(source_path, history_id)
         if stable_path:
             record["source_recording_path"] = str(source_path)
             record["recording_path"] = stable_path
-            return Path(stable_path)
-    return recording_path
+            resolved_path = Path(stable_path)
+    if _video_path_is_ready(resolved_path):
+        return _ensure_history_video_presentation(record, resolved_path)
+    return resolved_path
 
 
 @st.cache_data(show_spinner=False, max_entries=96)
@@ -1739,7 +1948,7 @@ def add_live_sample_to_history(
             "sample_label": str(sample.get("label") or f"Camarón muestra {sample_number}"),
             "sample_code": code,
             "lot_name": lot_name,
-            "captured_at": datetime.now().astimezone().strftime("%d/%m/%Y · %H:%M"),
+            "captured_at": str(sample.get("captured_at") or format_capture_timestamp()),
             "grade": grade,
             "description": description,
             "affected_percentage": affected_percentage,
@@ -1749,6 +1958,7 @@ def add_live_sample_to_history(
             else None,
             "recording_path": recording_path,
             "source_recording_path": source_recording_path,
+            "video_presentation_version": HISTORY_VIDEO_PRESENTATION_VERSION,
         }
     )
 
@@ -1835,7 +2045,7 @@ def render_analysis_history() -> None:
         preview_key = f"history_preview_{record_key}"
         with st.container(key=f"history_row_{record_key}"):
             video_column, metadata_column = st.columns(
-                [1.05, 2.8], gap="medium", vertical_alignment="center"
+                [1.0, 2.2], gap="small", vertical_alignment="center"
             )
             with video_column:
                 with st.container(key=preview_key):
@@ -1875,7 +2085,6 @@ def render_analysis_history() -> None:
             with metadata_column:
                 sample_code = str(record.get("sample_code") or "—")
                 grade = str(record.get("grade") or "Sin datos")
-                captured_at = str(record.get("captured_at") or "—")
                 lot_name = str(record.get("lot_name") or "—")
                 st.markdown(
                     f"""
@@ -1885,17 +2094,12 @@ def render_analysis_history() -> None:
                         <span class="history-card-grade">{escape(grade)}</span>
                       </div>
                       <div class="history-row-details">
-                        <span><small>Fecha</small><strong>{escape(captured_at)}</strong></span>
-                        <span><small>Piscina / lote</small><strong>{escape(lot_name)}</strong></span>
+                        <span><small>Piscina</small><strong>{escape(lot_name)}</strong></span>
                       </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
-        if index < len(page_records) - 1:
-            st.markdown('<div class="history-row-divider"></div>', unsafe_allow_html=True)
-
-
 def normalize_pool_name(value: str) -> str:
     """Normaliza el nombre de una piscina para evitar duplicados accidentales."""
     return " ".join(str(value).strip().split())
@@ -3564,16 +3768,18 @@ def render_live_camera(
                     cv2.bitwise_or(mask_layers[0], mask_layers[1]),
                     mask_opacity,
                 )
-            output = draw_live_status_overlay(
-                output,
-                True,
-                copy_output=False,
-            )
             if frame_number % LIVE_RECORD_EVERY_N_FRAMES == 1:
                 state.record_frame(
                     output,
                     resolution["frame_rate"] / LIVE_RECORD_EVERY_N_FRAMES,
                 )
+            # La etiqueta es solo de previsualización: se dibuja después de
+            # enviar una copia limpia y fechada al archivo de la muestra.
+            output = draw_live_status_overlay(
+                output,
+                True,
+                copy_output=False,
+            )
             return make_output_frame(output)
         except Exception as error:
             with state.lock:
@@ -4586,14 +4792,18 @@ def main() -> None:
             }
             .history-empty span { color: #a6d8eb; font-size: 0.86rem; }
             [class*="st-key-history_row_"] {
-                margin-top: 0.75rem;
-                padding: 0.3rem 0 0.55rem;
+                width: min(100%, 60rem) !important;
+                max-width: 60rem !important;
+                margin: 0.9rem auto 0 !important;
+                padding: 0.65rem 0.8rem 0.9rem;
+                border-bottom: 1px solid rgba(107, 191, 209, 0.24);
             }
             [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"] {
                 align-items: center;
+                column-gap: 1rem !important;
             }
             [class*="st-key-history_row_"] [data-testid="stColumn"]:first-child {
-                max-width: 250px;
+                max-width: 250px !important;
             }
             [class*="st-key-history_preview_"] {
                 position: relative !important;
@@ -4653,7 +4863,7 @@ def main() -> None:
             }
             .history-row-meta {
                 min-width: 0;
-                padding: 0.4rem 0.2rem;
+                padding: 0.4rem 0.55rem;
             }
             .history-row-top {
                 display: flex;
@@ -4665,14 +4875,12 @@ def main() -> None:
                 min-width: 0;
                 overflow-wrap: anywhere;
                 color: #ffffff;
-                font-size: clamp(0.95rem, 2.5vw, 1.18rem);
+                font-size: clamp(1.15rem, 2.1vw, 1.45rem);
                 font-weight: 750;
             }
             .history-row-details {
-                display: grid;
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 0.7rem;
-                margin-top: 0.65rem;
+                display: block;
+                margin-top: 0.8rem;
             }
             .history-row-details span { min-width: 0; }
             .history-row-details small,
@@ -4682,27 +4890,23 @@ def main() -> None:
             }
             .history-row-details small {
                 color: #a6d8eb;
-                font-size: 0.68rem;
-            }
-            .history-row-details strong {
-                margin-top: 0.1rem;
-                color: #ffffff;
                 font-size: 0.82rem;
                 font-weight: 600;
             }
-            .history-row-divider {
-                height: 1px;
-                margin: 0.1rem 0 0.35rem;
-                background: rgba(107, 191, 209, 0.27);
+            .history-row-details strong {
+                margin-top: 0.2rem;
+                color: #ffffff;
+                font-size: clamp(1rem, 1.6vw, 1.18rem);
+                font-weight: 650;
             }
             .history-card-grade {
                 flex: 0 0 auto;
-                padding: 0.28rem 0.55rem;
+                padding: 0.36rem 0.72rem;
                 background: #176b8a;
                 border: 1px solid #6bbfd1;
                 border-radius: 999px;
                 color: #ffffff;
-                font-size: 0.75rem;
+                font-size: 0.9rem;
                 font-weight: 800;
             }
             @media (max-width: 380px) {
