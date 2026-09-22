@@ -1055,10 +1055,6 @@ def sync_history_sample_codes(samples: list[dict[str, Any]]) -> None:
 def render_analysis_history() -> None:
     """Renderiza el historial filtrable con reproducción de videos de la sesión."""
     st.subheader("Historial")
-    st.caption(
-        "Consulta las muestras guardadas por tipo de análisis. Cada registro conserva "
-        "código, grado, piscina, fecha y el video capturado cuando sigue disponible."
-    )
     selected_type = st.selectbox(
         "Tipo de historial",
         [WHITE_SPOT_LABEL, VACUOLIZATION_LABEL],
@@ -3836,20 +3832,21 @@ def main() -> None:
         key="analysis_model_mode",
         label_visibility="collapsed",
     )
-    st.markdown(
-        """
-        <header class="app-header">
-            <div class="app-header-copy">
-                <div class="app-eyebrow">Análisis celular</div>
-                <h1 class="app-title">Monitoreo celular <span class="app-title-accent">en tiempo real</span></h1>
-                <p class="app-subtitle">
-                    Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
-                </p>
-            </div>
-        </header>
-        """,
-        unsafe_allow_html=True,
-    )
+    if analysis_mode != HISTORY_LABEL:
+        st.markdown(
+            """
+            <header class="app-header">
+                <div class="app-header-copy">
+                    <div class="app-eyebrow">Análisis celular</div>
+                    <h1 class="app-title">Monitoreo celular <span class="app-title-accent">en tiempo real</span></h1>
+                    <p class="app-subtitle">
+                        Detecta, revisa y guarda los resultados de tus muestras desde una sola vista.
+                    </p>
+                </div>
+            </header>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Parámetros internos: se ocultan para mantener la interfaz enfocada en el análisis.
     confidence = 0.35
