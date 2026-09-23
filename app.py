@@ -3908,7 +3908,7 @@ def render_live_camera(
             on_click=toggle_live_camera,
         )
 
-    camera_column, status_column = st.columns([1.55, 1.15], gap="large")
+    camera_column, status_column = st.columns([1.75, 1.0], gap="large")
     with camera_column:
         # WebRTC se encarga de transportar y pintar el video a la frecuencia
         # de la cámara. Streamlit no debe reconstruir una imagen JPEG en cada
@@ -3937,6 +3937,27 @@ def render_live_camera(
                 "video_receiver_size": 1,
                 "sendback_video": True,
                 "sendback_audio": False,
+                # La app ya ofrece controles propios fuera del video. Ocultar
+                # los controles de cámara/micrófono internos evita la franja
+                # adicional que streamlit-webrtc agrega bajo la imagen.
+                "media_toggle_controls": False,
+                # Conservamos los controles nativos del video (incluida la
+                # opción de pantalla completa), pero con tema oscuro y la
+                # relación de aspecto de la resolución seleccionada.
+                "video_html_attrs": {
+                    "autoPlay": True,
+                    "controls": True,
+                    "playsInline": True,
+                    "style": {
+                        "display": "block",
+                        "width": "100%",
+                        "height": "auto",
+                        "aspectRatio": f"{resolution['width']} / {resolution['height']}",
+                        "objectFit": "contain",
+                        "backgroundColor": "#061a33",
+                        "colorScheme": "dark",
+                    },
+                },
             }
             camera_context = webrtc_streamer(**webrtc_options)
             camera_state = getattr(camera_context, "state", None)
@@ -4469,22 +4490,22 @@ def main() -> None:
             [data-testid="stButtonGroup"] button * { color: inherit !important; }
             /* El video debe permanecer en WebRTC: así conserva la frecuencia
                de la cámara y no depende de reruns del WebSocket de Streamlit. */
+            [data-testid="stElementContainer"][class*="st-key-cell_live_camera"] {
+                width: 100% !important;
+            }
             [data-testid="stCustomComponentV1"] {
-                width: min(100%, 27rem) !important;
-                max-width: 27rem !important;
-                min-height: 24rem !important;
-                height: 24rem !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                min-height: 0 !important;
+                height: auto !important;
                 overflow: visible !important;
-                margin: 0.75rem auto 0 !important;
+                margin: 0.5rem 0 0 !important;
                 padding: 0 !important;
             }
             [data-testid="stCustomComponentV1"] iframe {
                 display: block !important;
                 position: relative !important;
                 width: 100% !important;
-                min-height: 24rem !important;
-                max-height: 24rem !important;
-                height: 24rem !important;
                 border: 0 !important;
             }
             .live-preview {
