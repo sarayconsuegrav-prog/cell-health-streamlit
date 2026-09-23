@@ -2085,20 +2085,126 @@ def render_analysis_history() -> None:
                 sample_code = str(record.get("sample_code") or "—")
                 grade = str(record.get("grade") or "Sin datos")
                 lot_name = str(record.get("lot_name") or "—")
+                counts = record.get("counts")
+                counts = counts if isinstance(counts, dict) else {}
+                measurements = record.get("measurements")
+                measurements = measurements if isinstance(measurements, dict) else {}
+
+                def history_count_value(key: str) -> int | None:
+                    if key not in counts:
+                        return None
+                    try:
+                        return max(0, int(float(counts[key] or 0)))
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+
+                def history_measurement_value(key: str) -> float | None:
+                    try:
+                        value = float(measurements[key])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        return None
+                    return value if math.isfinite(value) and value >= 0 else None
+
+                def history_measured_count(category: str) -> int | None:
+                    try:
+                        value = max(
+                            0,
+                            int(float(measurements[f"{category}_measured_cells"] or 0)),
+                        )
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        return None
+                    return value
+
+                healthy_count = history_count_value("sana")
+                sick_count = history_count_value("enferma")
+                total_count = history_count_value("total")
+                if total_count is None and healthy_count is not None and sick_count is not None:
+                    total_count = healthy_count + sick_count
+
+                count_metrics = ""
+                if healthy_count is not None or sick_count is not None:
+                    count_metrics = "".join(
+                        f'<div class="history-count-metric"><span>{label}</span>'
+                        f'<strong>{value if value is not None else "—"}</strong></div>'
+                        for label, value in (
+                            ("Sanas", healthy_count),
+                            ("Enfermas", sick_count),
+                            ("Total", total_count),
+                        )
+                    )
+                else:
+                    count_metrics = (
+                        '<div class="history-metrics-empty">Conteo no disponible</div>'
+                    )
+
+                measurement_classes: list[str] = []
+                for category, label in (("sana", "Sanas"), ("enferma", "Enfermas")):
+                    diameter = history_measurement_value(
+                        f"{category}_mean_equivalent_diameter_um"
+                    )
+                    perimeter = history_measurement_value(
+                        f"{category}_mean_perimeter_um"
+                    )
+                    area = history_measurement_value(f"{category}_mean_area_um2")
+                    measured_cells = history_measured_count(category)
+                    if diameter is None and perimeter is None and area is None:
+                        continue
+                    details = " · ".join(
+                        value
+                        for value in (
+                            f"Perímetro {perimeter:.2f} µm" if perimeter is not None else "",
+                            f"Área {area:.2f} µm²" if area is not None else "",
+                        )
+                        if value
+                    )
+                    measured_suffix = (
+                        f" · n={measured_cells}"
+                        if measured_cells is not None
+                        else ""
+                    )
+                    diameter_text = (
+                        f"Ø {diameter:.2f} µm" if diameter is not None else "Diámetro —"
+                    )
+                    measurement_classes.append(
+                        '<div class="history-measure-class">'
+                        f'<span class="history-measure-title">{label}</span>'
+                        f"<strong>{diameter_text}</strong>"
+                        f'<small>{details or "Sin otras medidas"}{measured_suffix}</small>'
+                        "</div>"
+                    )
+                if measurement_classes:
+                    measurement_metrics = (
+                        '<div class="history-measurements">'
+                        + "".join(measurement_classes)
+                        + "</div>"
+                    )
+                else:
+                    measurement_metrics = (
+                        '<div class="history-measurements history-metrics-empty">'
+                        "Medidas de tamaño no disponibles"
+                        "</div>"
+                    )
+
                 st.markdown(
                     f"""
-                    <div class="history-row-meta">
-                      <div class="history-meta-item history-meta-code">
-                        <span class="history-row-label">Código</span>
-                        <strong class="history-row-code">{escape(sample_code)}</strong>
+                    <div class="history-row-content">
+                      <div class="history-row-meta">
+                        <div class="history-meta-item history-meta-code">
+                          <span class="history-row-label">Código</span>
+                          <strong class="history-row-code">{escape(sample_code)}</strong>
+                        </div>
+                        <div class="history-meta-item history-meta-pool">
+                          <span class="history-row-label">Piscina</span>
+                          <strong class="history-row-pool">{escape(lot_name)}</strong>
+                        </div>
+                        <div class="history-meta-item history-meta-grade">
+                          <span class="history-row-label">Grado</span>
+                          <strong class="history-card-grade">{escape(grade)}</strong>
+                        </div>
                       </div>
-                      <div class="history-meta-item history-meta-pool">
-                        <span class="history-row-label">Piscina</span>
-                        <strong class="history-row-pool">{escape(lot_name)}</strong>
-                      </div>
-                      <div class="history-meta-item history-meta-grade">
-                        <span class="history-row-label">Grado</span>
-                        <strong class="history-card-grade">{escape(grade)}</strong>
+                      <div class="history-row-metrics">
+                        <div class="history-counts">{count_metrics}</div>
+                        {measurement_metrics}
                       </div>
                     </div>
                     """,
@@ -4946,6 +5052,79 @@ def main() -> None:
                 align-items: flex-end;
                 text-align: right;
             }
+            .history-row-content {
+                min-width: 0;
+                width: 100%;
+            }
+            .history-row-metrics {
+                display: grid;
+                grid-template-columns: minmax(12rem, 0.82fr) minmax(0, 1.6fr);
+                align-items: center;
+                gap: 0.9rem;
+                margin: 0 0.9rem 0.35rem;
+                padding-top: 0.6rem;
+                border-top: 1px solid rgba(107, 191, 209, 0.24);
+            }
+            .history-counts {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 0.55rem;
+                min-width: 0;
+            }
+            .history-count-metric {
+                display: flex;
+                flex-direction: column;
+                gap: 0.12rem;
+                min-width: 0;
+            }
+            .history-count-metric span,
+            .history-measure-title {
+                color: #a6d8eb;
+                font-size: 0.72rem;
+                font-weight: 700;
+                letter-spacing: 0.035em;
+                text-transform: uppercase;
+            }
+            .history-count-metric strong {
+                color: #f3fbff;
+                font-size: 1.08rem;
+                font-weight: 800;
+                line-height: 1.1;
+            }
+            .history-measurements {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.45rem 0.9rem;
+                min-width: 0;
+                padding-left: 0.9rem;
+                border-left: 1px solid rgba(107, 191, 209, 0.24);
+            }
+            .history-measure-class {
+                display: grid;
+                grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+                align-items: baseline;
+                column-gap: 0.45rem;
+                min-width: 0;
+            }
+            .history-measure-class strong {
+                overflow-wrap: anywhere;
+                color: #c4fffa;
+                font-size: 0.88rem;
+                font-weight: 800;
+                text-align: right;
+            }
+            .history-measure-class small {
+                grid-column: 1 / -1;
+                color: #c8eaf4;
+                font-size: 0.72rem;
+                line-height: 1.35;
+                overflow-wrap: anywhere;
+            }
+            .history-metrics-empty {
+                color: #a6d8eb;
+                font-size: 0.78rem;
+            }
             @media (max-width: 380px) {
                 [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"] {
                     flex-direction: column !important;
@@ -4970,6 +5149,18 @@ def main() -> None:
                 }
                 .history-meta-pool {
                     grid-column: 1 / -1;
+                }
+                .history-row-metrics {
+                    grid-template-columns: 1fr;
+                    gap: 0.65rem;
+                    margin-right: 0.4rem;
+                    margin-left: 0.4rem;
+                }
+                .history-measurements {
+                    padding-top: 0.6rem;
+                    padding-left: 0;
+                    border-top: 1px solid rgba(107, 191, 209, 0.24);
+                    border-left: 0;
                 }
             }
             [data-testid="stTabs"] {
