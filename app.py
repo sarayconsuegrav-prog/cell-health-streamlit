@@ -4496,18 +4496,13 @@ def main() -> None:
             [data-testid="stCustomComponentV1"] {
                 width: 100% !important;
                 max-width: 100% !important;
-                min-height: 0 !important;
-                height: auto !important;
                 overflow: visible !important;
                 margin: 0.5rem 0 0 !important;
                 padding: 0 !important;
             }
-            [data-testid="stCustomComponentV1"] iframe {
-                display: block !important;
-                position: relative !important;
-                width: 100% !important;
-                border: 0 !important;
-            }
+            /* stCustomComponentV1 es el iframe de WebRTC. No fijar ni poner
+               height:auto aquí: Streamlit le asigna la altura real por
+               setFrameHeight() y cualquier regla CSS la puede recortar. */
             .live-preview {
                 max-width: 42rem;
                 margin: 0.25rem 0 0.8rem;
