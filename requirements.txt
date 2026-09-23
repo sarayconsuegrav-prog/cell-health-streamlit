@@ -10,9 +10,9 @@ ultralytics==8.4.158
 lap==0.5.13
 openvino==2026.4.0
 
-# Avoid silently moving to OpenCV 5 or NumPy 3 in the live application.
+# Use the headless OpenCV wheel (the app does not call GUI APIs) and avoid
+# silently moving to OpenCV 5 or NumPy 3 in the live application.
 opencv-python-headless>=4.10,<5
-opencv-python>=4.10,<5
 numpy>=2.3,<2.6; python_version >= "3.11"
 numpy>=1.26,<2.3; python_version < "3.11"
 tornado>=6.3,<7

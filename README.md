@@ -6,7 +6,11 @@ La aplicación analiza **fotos y videos** con el modelo YOLO de segmentación. E
 
 El modo **Foto** es el predeterminado y hace una sola inferencia, por lo que es mucho más rápido que el video. Acepta PNG, JPG, JPEG y TIFF, muestra las máscaras sobre la fotografía, cuenta las células detectadas, calcula el porcentaje de enfermas y permite descargar la imagen en PNG y un reporte CSV.
 
-El tamaño de inferencia inicial es 1280 px, igual que el usado al entrenar el modelo, para preservar el detalle de células pequeñas.
+El tamaño de inferencia inicial es 1280 px para preservar el detalle de las
+células pequeñas. La metadata del OpenVINO incluido registra una exportación a
+640×640 con entrada dinámica; comprobé que ese artefacto acepta 512×512,
+640×480 y 1280×1280. La metadata de exportación no basta para confirmar el
+tamaño usado durante el entrenamiento.
 
 ## Análisis de videos
 
@@ -84,16 +88,27 @@ falta sin indicar que el lote fue enviado.
 
 ## Modelo
 
-El modelo revisado es de segmentación y declara estas clases:
+El artefacto incluido en `models/best_openvino_model/` es un modelo YOLO11m de
+segmentación, exportado el 20 de septiembre de 2026. Su metadata declara que
+fue entrenado con `data_wssv_seg_optimized_md5.yaml` y estas clases:
 
 - `0`: `celula_enferma`
 - `1`: `celula_sana`
 
-En ejecución local, la app usa `models/best.pt` si está disponible. En la versión publicada, el modelo se descarga automáticamente desde la release pública `v1.0.0`, por lo que no depende de rutas específicas de un equipo.
+Por defecto, foto, video y cámara en vivo usan el artefacto OpenVINO incluido
+en el repositorio. El análisis de foto usa `predict`; los dos modos de video
+usan ese mismo artefacto con seguimiento `track`. La expansión **Verificación
+del modelo** muestra el backend, el archivo realmente cargado y las clases
+validadas antes de inferir.
 
 ### Backend OpenVINO para CPU
 
-La app intenta usar OpenVINO como backend para CPU y conserva PyTorch como respaldo automático. Para forzar una prueba local con un modelo ya convertido:
+La selección del modelo respeta este orden: `CELL_OPENVINO_MODEL_DIR`, después
+`CELL_OPENVINO_MODEL_URL`, y finalmente la copia incluida en el repositorio.
+La URL debe ser un ZIP con los archivos `.xml`, `.bin` y `metadata.yaml`.
+Cada URL tiene su propio caché, por lo que cambiarla no reutiliza una descarga
+anterior. Estas variables se pueden establecer en el entorno o en **Secrets**
+de Streamlit Cloud. Para una prueba local:
 
 ```bash
 export CELL_MODEL_BACKEND=openvino
@@ -101,7 +116,18 @@ export CELL_OPENVINO_MODEL_DIR="/ruta/a/best_openvino_model"
 streamlit run app.py
 ```
 
-La carpeta OpenVINO debe contener los archivos `.xml` y `.bin` del modelo de segmentación. Si no se configura una carpeta, la app intenta convertir `best.pt` automáticamente y conserva la conversión en la caché temporal. También se puede configurar `CELL_OPENVINO_MODEL_URL` con un ZIP público de esa carpeta. Para forzar el backend anterior, usa `CELL_MODEL_BACKEND=pt`.
+Si no hay ningún artefacto OpenVINO disponible, la app descarga el checkpoint
+PyTorch indicado por `CELL_MODEL_URL` (por defecto, la release pública
+`v1.0.0`) y trata de convertirlo. El respaldo PyTorch se conserva para
+disponibilidad, pero la aplicación lo identifica y advierte que no se ha
+verificado que sus pesos coincidan con el modelo OpenVINO empaquetado; no deben
+considerarse intercambiables sin validación.
+
+Antes de inferir, cada artefacto debe declarar la tarea `segment` y exactamente
+una clase sana y una enferma en los IDs 0 y 1. Si no cumple este contrato, la
+app lo rechaza en vez de producir silenciosamente conteos de clases dudosos.
+El caché de sesión detecta también cambios en los archivos aunque conserven la
+misma ruta. Para forzar PyTorch directamente, usa `CELL_MODEL_BACKEND=pt`.
 
 Si se reemplaza el modelo local, conserva este nombre y ubicación:
 

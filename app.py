@@ -37,6 +37,13 @@ import numpy as np
 import streamlit as st
 from ultralytics import YOLO
 
+from model_contract import (
+    DEFAULT_MODEL_NAMES,
+    normalize_class_name as normalize_cell_class_name,
+    read_model_metadata_names,
+    validate_cell_model_contract,
+)
+
 try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -59,18 +66,30 @@ except ImportError as error:
     WEBRTC_IMPORT_ERROR = f"{type(error).__name__}: {error}"
 
 
+def runtime_setting(name: str) -> str:
+    """Lee configuración desde Secrets de Streamlit o variables de entorno."""
+    environment_value = os.getenv(name, "").strip()
+    try:
+        secret_value = st.secrets.get(name)
+    except Exception:
+        secret_value = None
+    if secret_value is None:
+        return environment_value
+    return str(secret_value).strip() or environment_value
+
+
 APP_DIR = Path(__file__).resolve().parent
 LOCAL_MODEL = APP_DIR / "models" / "best.pt"
-MODEL_URL = os.getenv(
-    "CELL_MODEL_URL",
-    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/v1.0.0/best.pt",
+MODEL_URL = runtime_setting("CELL_MODEL_URL") or (
+    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/v1.0.0/best.pt"
 )
-MODEL_BACKEND = os.getenv("CELL_MODEL_BACKEND", "openvino").strip().lower()
+MODEL_BACKEND = (runtime_setting("CELL_MODEL_BACKEND") or "openvino").strip().lower()
+MODEL_BACKEND = {"pytorch": "pt", "torch": "pt"}.get(MODEL_BACKEND, MODEL_BACKEND)
 OPENVINO_MODEL_DIR = APP_DIR / "models" / "best_openvino_model"
-OPENVINO_MODEL_URL = os.getenv("CELL_OPENVINO_MODEL_URL", "").strip()
+OPENVINO_MODEL_URL = runtime_setting("CELL_OPENVINO_MODEL_URL")
 CACHED_MODEL = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "best.pt"
 CACHED_OPENVINO_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "openvino"
-CACHED_OPENVINO_ARCHIVE = CACHED_OPENVINO_ROOT / "best_openvino_model.zip"
+MODEL_RESOLUTION_NOTICES: list[str] = []
 PHOTO_RENDER_VERSION = "measurement-diameter-perimeter-class-masks-v11"
 # La foto de referencia tiene una barra de escala negra cuyo rótulo indica 50 µm.
 SCALE_BAR_LENGTH_UM = 50.0
@@ -128,12 +147,6 @@ HISTORY_VIDEO_PRESENTATION_VERSION = "timestamp-no-live-badge-v1"
 CAPTURE_TIMEZONE = ZoneInfo("America/Guayaquil")
 ONEDRIVE_SENT_BATCHES_KEY = "onedrive_sent_batches"
 EXCEL_HEADERS = ("Código", "Vacuolización", "White Spot (WSSV)")
-# OpenVINO puede no exponer `model.names` en algunas versiones de Ultralytics.
-# Estos son los nombres incluidos en `models/best_openvino_model/metadata.yaml`.
-DEFAULT_MODEL_NAMES = {
-    0: "celula_enferma",
-    1: "celula_sana",
-}
 
 # Colores BGR de las capas de segmentación.
 COLORS_BGR = {
@@ -150,18 +163,6 @@ DEFAULT_ICE_SERVERS = [
         "stun:stun2.l.google.com:19302",
     ]},
 ]
-
-
-def runtime_setting(name: str) -> str:
-    """Lee una configuración opcional desde Secrets de Streamlit o variables de entorno."""
-    environment_value = os.getenv(name, "").strip()
-    try:
-        secret_value = st.secrets.get(name)
-    except Exception:
-        secret_value = None
-    if secret_value is None:
-        return environment_value
-    return str(secret_value).strip() or environment_value
 
 
 class OneDriveConfigurationError(RuntimeError):
@@ -612,68 +613,100 @@ def rtc_configuration() -> dict[str, Any]:
 
 def is_openvino_model_dir(path: Path) -> bool:
     """Comprueba que una carpeta contiene un modelo OpenVINO completo."""
-    return path.is_dir() and any(path.glob("*.xml")) and any(path.glob("*.bin"))
+    return path.is_dir() and any(
+        xml_path.with_suffix(".bin").is_file() for xml_path in path.glob("*.xml")
+    )
 
 
 def cached_openvino_model_path() -> Path | None:
-    """Obtiene el modelo OpenVINO local o lo descarga desde un ZIP configurado."""
-    configured_path = os.getenv("CELL_OPENVINO_MODEL_DIR", "").strip()
-    candidates = []
+    """Resuelve el modelo OpenVINO respetando explícitamente la configuración."""
+    configured_path = runtime_setting("CELL_OPENVINO_MODEL_DIR")
     if configured_path:
-        candidates.append(Path(configured_path).expanduser())
-    candidates.extend(
-        [
-            OPENVINO_MODEL_DIR,
-            CACHED_OPENVINO_ROOT / "best_openvino_model",
-        ]
-    )
-    for candidate in candidates:
+        candidate = Path(configured_path).expanduser()
         if is_openvino_model_dir(candidate):
             return candidate
+        MODEL_RESOLUTION_NOTICES.append(
+            "CELL_OPENVINO_MODEL_DIR no contiene un par válido de archivos XML/BIN."
+        )
 
-    if not OPENVINO_MODEL_URL:
-        return None
+    # Una URL explícitamente configurada representa una actualización solicitada
+    # por el operador y, por tanto, debe prevalecer sobre el modelo empaquetado.
+    # El caché queda separado por URL para no servir un ZIP antiguo al cambiarla.
+    if OPENVINO_MODEL_URL:
+        url_key = hashlib.sha256(OPENVINO_MODEL_URL.encode("utf-8")).hexdigest()[:16]
+        remote_root = CACHED_OPENVINO_ROOT / f"remote_{url_key}"
+        archive_path = remote_root / "model.zip"
+        extract_root = remote_root / "extracted"
+        try:
+            for candidate in [extract_root, *extract_root.rglob("*")]:
+                if is_openvino_model_dir(candidate):
+                    return candidate
 
-    try:
-        CACHED_OPENVINO_ROOT.mkdir(parents=True, exist_ok=True)
-        if not CACHED_OPENVINO_ARCHIVE.exists():
-            with urllib.request.urlopen(OPENVINO_MODEL_URL, timeout=180) as source, CACHED_OPENVINO_ARCHIVE.open("wb") as target:
-                shutil.copyfileobj(source, target)
+            remote_root.mkdir(parents=True, exist_ok=True)
+            if not archive_path.exists():
+                temporary_archive = remote_root / "model.zip.download"
+                with (
+                    urllib.request.urlopen(OPENVINO_MODEL_URL, timeout=180) as source,
+                    temporary_archive.open("wb") as target,
+                ):
+                    shutil.copyfileobj(source, target)
+                os.replace(temporary_archive, archive_path)
 
-        extract_root = CACHED_OPENVINO_ROOT / "extracted"
-        extract_root.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(CACHED_OPENVINO_ARCHIVE) as archive:
-            root = extract_root.resolve()
-            for member in archive.infolist():
-                destination = (extract_root / member.filename).resolve()
-                if root not in destination.parents and destination != root:
-                    raise ValueError("El ZIP del modelo contiene una ruta no válida.")
-            archive.extractall(extract_root)
+            extract_root.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(archive_path) as archive:
+                root = extract_root.resolve()
+                for member in archive.infolist():
+                    destination = (extract_root / member.filename).resolve()
+                    if root not in destination.parents and destination != root:
+                        raise ValueError("El ZIP del modelo contiene una ruta no válida.")
+                archive.extractall(extract_root)
 
-        for candidate in [extract_root, *extract_root.rglob("*")]:
-            if is_openvino_model_dir(candidate):
-                return candidate
-    except Exception:
-        CACHED_OPENVINO_ARCHIVE.unlink(missing_ok=True)
+            for candidate in [extract_root, *extract_root.rglob("*")]:
+                if is_openvino_model_dir(candidate):
+                    return candidate
+        except Exception as error:
+            (remote_root / "model.zip.download").unlink(missing_ok=True)
+            archive_path.unlink(missing_ok=True)
+            MODEL_RESOLUTION_NOTICES.append(
+                "No se pudo cargar CELL_OPENVINO_MODEL_URL "
+                f"({type(error).__name__}); se intentará el modelo local incluido."
+            )
+
+    # Si no se configuró un reemplazo, la copia versionada del repositorio es la
+    # fuente de producción; se conserva también una exportación temporal previa.
+    for candidate in (
+        OPENVINO_MODEL_DIR,
+        CACHED_OPENVINO_ROOT / "best_openvino_model",
+    ):
+        if is_openvino_model_dir(candidate):
+            return candidate
     return None
 
 
 def default_pt_model_path() -> Path:
-    """Usa el modelo local o descarga la copia pública de la release."""
+    """Usa el modelo local o descarga una copia cacheada por URL."""
     if LOCAL_MODEL.exists():
         return LOCAL_MODEL
-    if CACHED_MODEL.exists():
-        return CACHED_MODEL
+
+    url_key = hashlib.sha256(MODEL_URL.encode("utf-8")).hexdigest()[:16]
+    cached_model = CACHED_MODEL.with_name(f"best_{url_key}.pt")
+    if cached_model.exists():
+        return cached_model
 
     try:
-        CACHED_MODEL.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(MODEL_URL, timeout=180) as source, CACHED_MODEL.open("wb") as target:
+        cached_model.parent.mkdir(parents=True, exist_ok=True)
+        temporary_model = cached_model.with_suffix(".pt.download")
+        with (
+            urllib.request.urlopen(MODEL_URL, timeout=180) as source,
+            temporary_model.open("wb") as target,
+        ):
             shutil.copyfileobj(source, target)
-        return CACHED_MODEL
+        os.replace(temporary_model, cached_model)
+        return cached_model
     except Exception:
         # La interfaz mostrará el mensaje existente de modelo no encontrado.
-        CACHED_MODEL.unlink(missing_ok=True)
-        return LOCAL_MODEL
+        cached_model.with_suffix(".pt.download").unlink(missing_ok=True)
+        return cached_model
 
 
 def export_openvino_model(model_path: Path) -> Path | None:
@@ -713,31 +746,102 @@ def export_openvino_model(model_path: Path) -> Path | None:
 def default_model_path() -> Path | None:
     """Usa OpenVINO si fue seleccionado y conserva PyTorch como respaldo."""
     if MODEL_BACKEND in {"openvino", "ov"}:
-        if st.session_state.get("openvino_fallback"):
-            return default_pt_model_path()
         openvino_path = cached_openvino_model_path()
         if openvino_path is not None:
+            fallback_key = f"{openvino_path}:{model_path_signature(openvino_path)}"
+            if st.session_state.get("openvino_fallback_for") == fallback_key:
+                return default_pt_model_path()
             return openvino_path
-        return export_openvino_model(default_pt_model_path())
+        pt_path = default_pt_model_path()
+        if not pt_path.is_file():
+            return None
+        # Si no existe una conversión y no se puede exportar, usar ese mismo
+        # checkpoint PT como respaldo es preferible a terminar con una pantalla
+        # vacía. La interfaz lo identificará claramente como PyTorch.
+        return export_openvino_model(pt_path) or pt_path
     return default_pt_model_path()
 
 
 def normalize_class_name(name: str) -> str:
     """Agrupa los nombres del modelo en las categorías usadas por el tablero."""
-    normalized = name.lower().strip().replace("á", "a").replace("é", "e")
-    if "enferm" in normalized:
-        return "enferma"
-    if "sana" in normalized or "salud" in normalized or "healthy" in normalized:
-        return "sana"
-    return "otra"
+    return normalize_cell_class_name(name)
+
+
+def model_path_signature(model_path: Path) -> str:
+    """Detecta un reemplazo del modelo aunque conserve la misma ruta."""
+    if model_path.is_dir():
+        artifacts = sorted(
+            [
+                *model_path.glob("*.xml"),
+                *model_path.glob("*.bin"),
+                *model_path.glob("metadata.yaml"),
+            ]
+        )
+    else:
+        artifacts = [model_path]
+    signature = []
+    for artifact in artifacts:
+        try:
+            stat = artifact.stat()
+        except OSError:
+            continue
+        signature.append(f"{artifact.name}:{stat.st_size}:{stat.st_mtime_ns}")
+    return "|".join(signature) or "missing"
+
+
+@st.cache_data(show_spinner=False)
+def _cached_model_fingerprint(
+    file_signature: tuple[tuple[str, int, int], ...],
+) -> str:
+    """Compute a SHA-256 once per exact on-disk model revision."""
+    digest = hashlib.sha256()
+    for file_path, _, _ in file_signature:
+        digest.update(Path(file_path).name.encode("utf-8"))
+        digest.update(b"\0")
+        with Path(file_path).open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def model_artifact_fingerprint(model_path: Path) -> str:
+    """Fingerprint a model file or the XML/BIN/metadata files in an IR folder."""
+    if model_path.is_dir():
+        files = sorted(
+            [
+                *model_path.glob("*.xml"),
+                *model_path.glob("*.bin"),
+                *model_path.glob("metadata.yaml"),
+            ]
+        )
+    else:
+        files = [model_path]
+    signature = []
+    for file_path in files:
+        try:
+            stat = file_path.stat()
+        except OSError:
+            continue
+        signature.append((str(file_path.resolve()), stat.st_size, stat.st_mtime_ns))
+    if not signature:
+        return "no disponible"
+    return _cached_model_fingerprint(tuple(signature))
 
 
 def load_model(model_path: str | Path) -> YOLO:
-    """Carga el modelo de YOLO y declara segmentación para carpetas OpenVINO."""
+    """Carga y valida que el artefacto sea el segmentador celular esperado."""
     path = Path(model_path)
     if path.is_dir():
-        return YOLO(str(path), task="segment")
-    return YOLO(str(path))
+        model = YOLO(str(path), task="segment")
+    else:
+        model = YOLO(str(path))
+    model_names = get_model_names(model, path)
+    validate_cell_model_contract(model.task, model_names)
+    model._cell_health_backend = "OpenVINO" if path.is_dir() else "PyTorch"
+    model._cell_health_model_source = path.name
+    model._cell_health_model_path = str(path.resolve())
+    model._cell_health_model_names = model_names
+    return model
 
 
 def load_live_model(model_path: str | Path) -> YOLO:
@@ -754,6 +858,11 @@ def load_live_model(model_path: str | Path) -> YOLO:
             fallback_path = default_pt_model_path()
             try:
                 loaded_model = load_model(fallback_path)
+                loaded_model._cell_health_fallback_message = (
+                    "OpenVINO no pudo cargarse. Se usa el checkpoint PyTorch "
+                    f"`{fallback_path.name}`; no está verificado que sus "
+                    "pesos coincidan con el modelo OpenVINO empaquetado."
+                )
             except Exception as fallback_error:
                 raise RuntimeError(
                     "No fue posible cargar OpenVINO ni el respaldo `.pt`: "
@@ -770,7 +879,10 @@ def load_live_model(model_path: str | Path) -> YOLO:
     return loaded_model
 
 
-def get_model_names(model: YOLO | None) -> dict[int, str]:
+def get_model_names(
+    model: YOLO | None,
+    model_path: str | Path | None = None,
+) -> dict[int, str]:
     """Obtiene las clases tanto de YOLO/PyTorch como de ciertos backends OpenVINO.
 
     Algunas versiones de Ultralytics cargan el modelo OpenVINO sin publicar
@@ -780,6 +892,10 @@ def get_model_names(model: YOLO | None) -> dict[int, str]:
     """
     if model is None:
         return DEFAULT_MODEL_NAMES.copy()
+
+    stored_names = getattr(model, "_cell_health_model_names", None)
+    if isinstance(stored_names, dict) and stored_names:
+        return {int(key): str(value) for key, value in stored_names.items()}
 
     candidates: list[Any] = []
     try:
@@ -814,12 +930,47 @@ def get_model_names(model: YOLO | None) -> dict[int, str]:
         elif isinstance(names, (list, tuple)) and names:
             return {index: str(value) for index, value in enumerate(names)}
 
-    return DEFAULT_MODEL_NAMES.copy()
+    if model_path is not None:
+        return read_model_metadata_names(Path(model_path))
+    stored_path = getattr(model, "_cell_health_model_path", "")
+    if stored_path:
+        return read_model_metadata_names(Path(stored_path))
+    return {}
+
+
+def describe_loaded_model(model: YOLO) -> dict[str, str]:
+    """Describe the actual loaded artifact, not just the configured backend."""
+    names = get_model_names(model)
+    validate_cell_model_contract(model.task, names)
+    classes = " · ".join(
+        f"{class_id}: {name}"
+        for class_id, name in sorted(names.items())
+    )
+    backend = str(getattr(model, "_cell_health_backend", "desconocido"))
+    fallback_message = str(getattr(model, "_cell_health_fallback_message", ""))
+    if (
+        not fallback_message
+        and backend == "PyTorch"
+        and MODEL_BACKEND in {"openvino", "ov"}
+    ):
+        fallback_message = (
+            "La configuración solicita OpenVINO, pero esta sesión está usando PyTorch. "
+            "Verifica el artefacto indicado y ten presente que el checkpoint `.pt` "
+            "de respaldo no está verificado como idéntico al modelo OpenVINO incluido."
+        )
+    return {
+        "backend": backend,
+        "source": str(getattr(model, "_cell_health_model_source", "sin identificar")),
+        "path": str(getattr(model, "_cell_health_model_path", "")),
+        "task": str(model.task),
+        "classes": classes,
+        "fallback": fallback_message,
+    }
 
 
 def get_session_model(model_path: Path) -> YOLO:
     """Conserva el modelo entre reruns sin compartir el tracker entre usuarios."""
-    model_key = f"{MODEL_BACKEND}:{model_path}"
+    model_key = f"{MODEL_BACKEND}:{model_path}:{model_path_signature(model_path)}"
     cached_model = st.session_state.get("cell_model")
     cached_model_path = st.session_state.get("cell_model_path")
     if cached_model is None or cached_model_path != model_key:
@@ -827,6 +978,53 @@ def get_session_model(model_path: Path) -> YOLO:
         st.session_state["cell_model"] = cached_model
         st.session_state["cell_model_path"] = model_key
     return cached_model
+
+
+def render_model_diagnostics(selected_path: Path) -> None:
+    """Show the operator which verified artifact/backend is actually in use."""
+    loaded_model = st.session_state.get("cell_model")
+    expected_model_key = (
+        f"{MODEL_BACKEND}:{selected_path}:{model_path_signature(selected_path)}"
+    )
+    if st.session_state.get("cell_model_path") != expected_model_key:
+        loaded_model = None
+    if loaded_model is None:
+        live_state = st.session_state.get("live_session_state")
+        if live_state is not None:
+            lock = getattr(live_state, "lock", None)
+            if lock is not None:
+                with lock:
+                    loaded_model = getattr(live_state, "inference_model", None)
+
+    with st.expander("Verificación del modelo", expanded=False):
+        for notice in MODEL_RESOLUTION_NOTICES:
+            st.warning(notice)
+        if loaded_model is None:
+            selected_backend = "OpenVINO" if selected_path.is_dir() else "PyTorch"
+            st.info(
+                f"Modelo seleccionado: {selected_backend} · {selected_path.name}. "
+                "Se validará y cargará al iniciar un análisis."
+            )
+            if selected_backend == "PyTorch" and MODEL_BACKEND in {"openvino", "ov"}:
+                st.warning(
+                    "Se solicitó OpenVINO, pero no hay una conversión disponible; "
+                    "la inferencia usará PyTorch."
+                )
+            st.write("Tarea esperada: segmentación de células.")
+            st.write("Clases esperadas: célula enferma y célula sana.")
+            fingerprint_path = selected_path
+        else:
+            info = describe_loaded_model(loaded_model)
+            st.success(
+                f"Modelo cargado: {info['backend']} · {info['task']} · {info['source']}"
+            )
+            st.write(f"Clases verificadas: {info['classes']}.")
+            if info["fallback"]:
+                st.warning(info["fallback"])
+            fingerprint_path = Path(info["path"]) if info["path"] else selected_path
+
+        if st.button("Calcular huella SHA-256 del modelo", key="model_fingerprint_check"):
+            st.code(model_artifact_fingerprint(fingerprint_path), language=None)
 
 
 def reset_trackers(model: YOLO) -> None:
@@ -3376,6 +3574,16 @@ def render_live_metrics_panel(
         if snapshot["model_loading"]:
             st.caption("Preparando el modelo… el video continúa grabándose.")
 
+        with state.lock:
+            runtime_info = getattr(state, "model_runtime_info", None)
+        if runtime_info:
+            st.caption(
+                f"Modelo en uso: {runtime_info['backend']} · "
+                f"{runtime_info['task']} · {runtime_info['source']}"
+            )
+            if runtime_info["fallback"]:
+                st.warning(runtime_info["fallback"])
+
         if snapshot["last_error"]:
             st.warning(f"La cámara continúa, pero una inferencia dio error: {snapshot['last_error']}")
 
@@ -3570,6 +3778,7 @@ def render_live_camera(
         if model is not None:
             state.inference_model = model
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
+            state.model_runtime_info = describe_loaded_model(model)
     if "live_camera_playing" not in st.session_state:
         st.session_state["live_camera_playing"] = False
     if "live_camera_requested" not in st.session_state:
@@ -3713,9 +3922,12 @@ def render_live_camera(
             try:
                 loaded_model = model_loader()
                 loaded_names = get_model_names(loaded_model)
+                validate_cell_model_contract(loaded_model.task, loaded_names)
+                runtime_info = describe_loaded_model(loaded_model)
                 with state.lock:
                     state.inference_model = loaded_model
                     state.inference_model_names = loaded_names
+                    state.model_runtime_info = runtime_info
                     state.model_loading = False
                     state.inference_retry_at = 0.0
                     state.last_error = ""
@@ -5417,35 +5629,51 @@ def main() -> None:
     mask_opacity = 0.50
     low_limit, medium_limit, high_limit = 10.0, 30.0, 60.0
 
-    model_path = default_model_path()
-    if model_path is None and MODEL_BACKEND in {"openvino", "ov"}:
-        st.session_state["openvino_fallback"] = True
-        model_path = default_pt_model_path()
-    if model_path is None or not (model_path.is_file() or is_openvino_model_dir(model_path)):
-        if MODEL_BACKEND in {"openvino", "ov"}:
+    model_path: Path | None = None
+    if analysis_mode == WHITE_SPOT_LABEL:
+        if MODEL_BACKEND not in {"openvino", "ov", "pt"}:
             st.error(
-                "Se seleccionó OpenVINO, pero no se encontró el modelo convertido. "
-                "Configura `CELL_OPENVINO_MODEL_DIR` o `CELL_OPENVINO_MODEL_URL`."
+                f"CELL_MODEL_BACKEND='{MODEL_BACKEND}' no es válido. Usa `openvino` o `pt`."
             )
-        else:
-            st.error("No se encontró el archivo del modelo `best.pt`.")
-        st.stop()
+            st.stop()
+        model_path = default_model_path()
+        if model_path is None and MODEL_BACKEND in {"openvino", "ov"}:
+            model_path = default_pt_model_path()
+        if model_path is None or not (
+            model_path.is_file() or is_openvino_model_dir(model_path)
+        ):
+            if MODEL_BACKEND in {"openvino", "ov"}:
+                st.error(
+                    "Se seleccionó OpenVINO, pero no se encontró el modelo convertido. "
+                    "Configura `CELL_OPENVINO_MODEL_DIR` o `CELL_OPENVINO_MODEL_URL`."
+                )
+            else:
+                st.error("No se encontró el archivo del modelo `best.pt`.")
+            st.stop()
 
     def get_app_model() -> YOLO:
         """Carga el modelo solo cuando el modo elegido realmente lo necesita."""
         nonlocal model_path
+        if model_path is None:
+            raise RuntimeError("No se resolvió el artefacto del modelo de segmentación.")
         try:
             loaded_model = get_session_model(model_path)
         except Exception as error:
             if MODEL_BACKEND in {"openvino", "ov"} and model_path.is_dir():
-                st.session_state["openvino_fallback"] = True
+                st.session_state["openvino_fallback_for"] = (
+                    f"{model_path}:{model_path_signature(model_path)}"
+                )
                 fallback_path = default_pt_model_path()
                 try:
                     loaded_model = get_session_model(fallback_path)
-                    st.warning(
-                        "OpenVINO no pudo compilarse en este CPU; se está usando `.pt` como respaldo. "
-                        "La app continúa funcionando, pero este equipo requiere otra optimización."
+                    fallback_message = (
+                        "OpenVINO no pudo cargarse. Se usa PyTorch desde "
+                        f"`{fallback_path.name}`; no está verificado que sus pesos "
+                        "coincidan con el modelo OpenVINO empaquetado. "
+                        f"Detalle de OpenVINO: {type(error).__name__}: {error}"
                     )
+                    loaded_model._cell_health_fallback_message = fallback_message
+                    st.warning(fallback_message)
                     model_path = fallback_path
                 except Exception as fallback_error:
                     st.error(
@@ -5464,6 +5692,9 @@ def main() -> None:
             )
             st.stop()
         return loaded_model
+
+    if analysis_mode == WHITE_SPOT_LABEL and model_path is not None:
+        render_model_diagnostics(model_path)
 
     def render_uploaded_video_mode() -> None:
         """Renderiza el análisis de un archivo de video dentro de su pestaña."""
