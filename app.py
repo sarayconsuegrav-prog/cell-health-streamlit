@@ -12,9 +12,11 @@ from datetime import datetime
 import gc
 import hashlib
 from html import escape
+from importlib import metadata
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import tempfile
@@ -43,6 +45,7 @@ from model_contract import (
     read_model_metadata_names,
     validate_cell_model_contract,
 )
+from model_artifacts import MODEL_ARTIFACTS, ModelArtifact, verify_model_artifact
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -90,17 +93,10 @@ OPENVINO_MODEL_URL = runtime_setting("CELL_OPENVINO_MODEL_URL")
 CACHED_MODEL = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "best.pt"
 CACHED_OPENVINO_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "openvino"
 CEDIa_MODEL_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "wssv-v6"
-MASK2FORMER_MODEL_URL = (
-    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/"
-    "wssv-v6-models/mask2former-mejor.pth"
-)
-RFDETR_MODEL_URL = (
-    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/"
-    "wssv-v6-models/rfdetr-checkpoint-best-total.pth"
-)
-_WSSV_V6_MODELS: dict[str, Any] = {}
-_WSSV_V6_MODEL_LOCK = Lock()
 MODEL_RESOLUTION_NOTICES: list[str] = []
+_CEDIA_DOWNLOAD_LOCKS = {kind: Lock() for kind in MODEL_ARTIFACTS}
+_CEDIA_VERIFIED_LOCK = Lock()
+_CEDIA_VERIFIED_FILES: set[tuple[str, int, int, int, str]] = set()
 PHOTO_RENDER_VERSION = "measurement-diameter-perimeter-class-masks-v11"
 # La foto de referencia tiene una barra de escala negra cuyo rótulo indica 50 µm.
 SCALE_BAR_LENGTH_UM = 50.0
@@ -108,18 +104,14 @@ SCALE_BAR_LENGTH_UM = 50.0
 # Se usa únicamente cuando una foto de 40× no conserva la barra visible.
 REFERENCE_SCALE_BAR_PX = 144.0
 REFERENCE_IMAGE_WIDTH_PX = 859.0
-# Las fotos se analizan con más detalle; para cámara/video se usa un tamaño menor
-# para que el procesamiento sea ágil en una Mac sin GPU dedicada.
-PHOTO_IMAGE_SIZE = 1280
 LIVE_IMAGE_SIZE = 640
-VIDEO_IMAGE_SIZE = 512
 LIVE_INFERENCE_EVERY_N_FRAMES = 3
 VIDEO_INFERENCE_STRIDE = 2
 VIDEO_OUTPUT_MAX_WIDTH = 1280
 LIVE_INFERENCE_RETRY_SECONDS = 2.0
 LIVE_RECORD_EVERY_N_FRAMES = 2
-LIVE_TRACKER_CONFIG = APP_DIR / "trackers" / "live_botsort.yaml"
 LIVE_TRACK_MIN_OBSERVATIONS = 2
+LIVE_TRACKER_CONFIG = APP_DIR / "trackers" / "live_botsort.yaml"
 # Las mediciones se usan para promedios; conservar cada observación de cada
 # fotograma puede hacer crecer la RAM sin mejorar de forma apreciable el reporte.
 MAX_MEASUREMENT_OBSERVATIONS = 2000
@@ -128,21 +120,18 @@ LIVE_RESOLUTIONS = {
         "width": 640,
         "height": 480,
         "frame_rate": 24,
-        "inference_size": 512,
         "inference_every": 3,
     },
     "1280 × 720 (HD)": {
         "width": 1280,
         "height": 720,
         "frame_rate": 20,
-        "inference_size": 640,
         "inference_every": 4,
     },
     "1920 × 1080 (Full HD · 2 MP)": {
         "width": 1920,
         "height": 1080,
         "frame_rate": 15,
-        "inference_size": 640,
         "inference_every": 5,
     },
 }
@@ -839,43 +828,73 @@ def model_artifact_fingerprint(model_path: Path) -> str:
     return _cached_model_fingerprint(tuple(signature))
 
 
-def download_cedia_checkpoint(filename: str, url: str) -> Path:
-    """Download and cache a large, versioned model artifact from the v6 release."""
-    target = CEDIa_MODEL_ROOT / filename
-    if target.is_file() and target.stat().st_size > 1_000_000:
-        return target
-    CEDIa_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".download")
-    try:
-        with urllib.request.urlopen(url, timeout=600) as source, temporary.open("wb") as output:
-            shutil.copyfileobj(source, output)
-        if temporary.stat().st_size < 1_000_000:
-            raise ValueError("El artefacto descargado está incompleto.")
-        os.replace(temporary, target)
-        return target
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+def _verify_cached_cedia_checkpoint(path: Path, artifact: ModelArtifact) -> str:
+    """Verify each unchanged checkpoint once per process, including its exact digest."""
+    stat = path.stat()
+    signature = (
+        str(path.resolve()),
+        getattr(stat, "st_ino", 0),
+        stat.st_size,
+        stat.st_mtime_ns,
+        artifact.sha256,
+    )
+    with _CEDIA_VERIFIED_LOCK:
+        if signature not in _CEDIA_VERIFIED_FILES:
+            digest = verify_model_artifact(path, artifact)
+            _CEDIA_VERIFIED_FILES.add(signature)
+            return digest
+    return artifact.sha256
+
+
+def download_cedia_checkpoint(artifact: ModelArtifact) -> Path:
+    """Download a v6 model atomically and verify its published size and SHA-256."""
+    target = CEDIa_MODEL_ROOT / artifact.filename
+    with _CEDIA_DOWNLOAD_LOCKS[artifact.kind]:
+        if target.is_file():
+            try:
+                _verify_cached_cedia_checkpoint(target, artifact)
+                return target
+            except (OSError, ValueError):
+                target.unlink(missing_ok=True)
+        CEDIa_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{artifact.filename}.", suffix=".download", dir=CEDIa_MODEL_ROOT
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            with urllib.request.urlopen(artifact.url, timeout=600) as source, temporary.open("wb") as output:
+                shutil.copyfileobj(source, output)
+            verify_model_artifact(temporary, artifact)
+            os.replace(temporary, target)
+            _verify_cached_cedia_checkpoint(target, artifact)
+            return target
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
 
 def get_wssv_v6_model(model_kind: str) -> Any:
-    """Load each large v6 model once per app process, including background threads."""
-    if model_kind == "mask2former":
-        url, filename = MASK2FORMER_MODEL_URL, "mask2former-mejor.pth"
-    elif model_kind == "rfdetr":
-        url, filename = RFDETR_MODEL_URL, "rfdetr-checkpoint-best-total.pth"
-    else:
+    """Resolve the pinned checkpoint and reuse its process-wide model resource."""
+    artifact = MODEL_ARTIFACTS.get(model_kind)
+    if artifact is None:
         raise ValueError(f"Modelo WSSV v6 desconocido: {model_kind}")
-    with _WSSV_V6_MODEL_LOCK:
-        model = _WSSV_V6_MODELS.get(model_kind)
-        if model is None:
-            checkpoint = download_cedia_checkpoint(filename, url)
-            from model_adapters import Mask2FormerAdapter, RFDETRSegAdapter
+    checkpoint = download_cedia_checkpoint(artifact)
+    return _cached_wssv_v6_model(model_kind, artifact.sha256, str(checkpoint))
 
-            model_class = Mask2FormerAdapter if model_kind == "mask2former" else RFDETRSegAdapter
-            model = model_class(checkpoint)
-            _WSSV_V6_MODELS[model_kind] = model
-    return model
+
+@st.cache_resource(show_spinner=False)
+def _cached_wssv_v6_model(model_kind: str, checkpoint_sha256: str, checkpoint_path: str) -> Any:
+    """Keep heavy model objects alive across Streamlit reruns and sessions."""
+    artifact = MODEL_ARTIFACTS[model_kind]
+    if checkpoint_sha256 != artifact.sha256:
+        raise ValueError(f"La huella configurada no coincide para {artifact.filename}.")
+    checkpoint = Path(checkpoint_path)
+    _verify_cached_cedia_checkpoint(checkpoint, artifact)
+    from model_adapters import Mask2FormerAdapter, RFDETRSegAdapter
+
+    model_class = Mask2FormerAdapter if model_kind == "mask2former" else RFDETRSegAdapter
+    return model_class(checkpoint)
 
 
 def load_model(model_path: str | Path) -> YOLO:
@@ -895,12 +914,7 @@ def load_model(model_path: str | Path) -> YOLO:
 
 
 def load_live_model(model_path: str | Path) -> YOLO:
-    """Carga el modelo de cámara sin depender del estado de Streamlit.
-
-    La cámara se mantiene renderizada mientras este trabajo ocurre en segundo
-    plano. Esto evita que el primer clic de «Iniciar detección» bloquee el
-    componente WebRTC mientras OpenVINO compila el modelo.
-    """
+    """Legacy YOLO/OpenVINO loader; the active WSSV camera uses RF-DETR v6."""
     try:
         loaded_model = load_model(model_path)
     except Exception as error:
@@ -930,7 +944,7 @@ def load_live_model(model_path: str | Path) -> YOLO:
 
 
 def get_model_names(
-    model: YOLO | None,
+    model: Any | None,
     model_path: str | Path | None = None,
 ) -> dict[int, str]:
     """Obtiene las clases tanto de YOLO/PyTorch como de ciertos backends OpenVINO.
@@ -988,7 +1002,7 @@ def get_model_names(
     return {}
 
 
-def describe_loaded_model(model: YOLO) -> dict[str, str]:
+def describe_loaded_model(model: Any) -> dict[str, str]:
     """Describe the actual loaded artifact, not just the configured backend."""
     names = get_model_names(model)
     validate_cell_model_contract(model.task, names)
@@ -1012,6 +1026,9 @@ def describe_loaded_model(model: YOLO) -> dict[str, str]:
         "backend": backend,
         "source": str(getattr(model, "_cell_health_model_source", "sin identificar")),
         "path": str(getattr(model, "_cell_health_model_path", "")),
+        "device": str(getattr(model, "_cell_health_device", "no expuesto por el backend")),
+        "input_size": str(getattr(model, "_cell_health_input_size", "no expuesto por el backend")),
+        "num_queries": str(getattr(model, "_cell_health_num_queries", "no expuesto por el backend")),
         "task": str(model.task),
         "classes": classes,
         "fallback": fallback_message,
@@ -1030,54 +1047,129 @@ def get_session_model(model_path: Path) -> YOLO:
     return cached_model
 
 
-def render_model_diagnostics(selected_path: Path) -> None:
-    """Show the operator which verified artifact/backend is actually in use."""
-    loaded_model = st.session_state.get("cell_model")
-    expected_model_key = (
-        f"{MODEL_BACKEND}:{selected_path}:{model_path_signature(selected_path)}"
+def application_source_fingerprint() -> str:
+    """Fingerprint the source files that determine model routing and inference."""
+    digest = hashlib.sha256()
+    for filename in ("app.py", "model_adapters.py", "model_contract.py", "model_artifacts.py", "requirements.txt"):
+        source = APP_DIR / filename
+        if not source.is_file():
+            continue
+        digest.update(filename.encode("utf-8"))
+        digest.update(b"\0")
+        with source.open("rb") as contents:
+            for chunk in iter(lambda: contents.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def _package_version(distribution: str) -> str:
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:
+        return "no instalado"
+
+
+def record_mask2former_inference(mode: str, counts: dict[str, int]) -> None:
+    """Persist evidence that a loaded Mask2Former model completed inference."""
+    runtime_info = st.session_state.get("wssv_mask2former_runtime")
+    if not isinstance(runtime_info, dict):
+        return
+    runtime_info = dict(runtime_info)
+    runtime_info["last_inference"] = (
+        f"{mode} · {counts.get('sana', 0)} sanas · "
+        f"{counts.get('enferma', 0)} enfermas · {counts.get('total', 0)} total · "
+        f"{datetime.now(CAPTURE_TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')}"
     )
-    if st.session_state.get("cell_model_path") != expected_model_key:
-        loaded_model = None
-    if loaded_model is None:
-        live_state = st.session_state.get("live_session_state")
-        if live_state is not None:
-            lock = getattr(live_state, "lock", None)
-            if lock is not None:
-                with lock:
-                    loaded_model = getattr(live_state, "inference_model", None)
+    st.session_state["wssv_mask2former_runtime"] = runtime_info
+    st.session_state.pop("wssv_mask2former_error", None)
+
+
+def render_wssv_model_diagnostics() -> None:
+    """Show the configured v6 routes and which verified model this session used."""
+    live_state = st.session_state.get("live_session_state")
+    live_info: dict[str, str] = {}
+    if live_state is not None:
+        lock = getattr(live_state, "lock", None)
+        if lock is not None:
+            with lock:
+                live_info = dict(getattr(live_state, "model_runtime_info", {}) or {})
 
     with st.expander("Verificación del modelo", expanded=False):
-        for notice in MODEL_RESOLUTION_NOTICES:
-            st.warning(notice)
-        if loaded_model is None:
-            selected_backend = "OpenVINO" if selected_path.is_dir() else "PyTorch"
-            st.info(
-                f"Modelo seleccionado: {selected_backend} · {selected_path.name}. "
-                "Se validará y cargará al iniciar un análisis."
+        st.write(f"Huella del código desplegado: `{application_source_fingerprint()}`")
+        st.write(
+            f"Runtime: Python {platform.python_version()} · {platform.machine()} · "
+            f"{os.cpu_count() or 'desconocido'} CPU lógicas visibles"
+        )
+        versions = (
+            ("Streamlit", "streamlit"),
+            ("PyTorch", "torch"),
+            ("TorchVision", "torchvision"),
+            ("Transformers", "transformers"),
+            ("RF-DETR", "rfdetr"),
+            ("OpenCV", "opencv-python-headless"),
+        )
+        st.caption(" · ".join(f"{label} {_package_version(package)}" for label, package in versions))
+        st.warning(
+            "CELL_MODEL_URL y CELL_MODEL_BACKEND pertenecen al cargador YOLO heredado. "
+            "Las rutas WSSV activas usan los dos checkpoints fijados que aparecen abajo."
+        )
+
+        for model_kind in ("mask2former", "rfdetr"):
+            artifact = MODEL_ARTIFACTS[model_kind]
+            info = (
+                st.session_state.get("wssv_mask2former_runtime", {})
+                if model_kind == "mask2former"
+                else live_info
             )
-            if selected_backend == "PyTorch" and MODEL_BACKEND in {"openvino", "ov"}:
-                st.warning(
-                    "Se solicitó OpenVINO, pero no hay una conversión disponible; "
-                    "la inferencia usará PyTorch."
-                )
-            st.write("Tarea esperada: segmentación de células.")
-            st.write("Clases esperadas: célula enferma y célula sana.")
-            fingerprint_path = selected_path
-        else:
-            info = describe_loaded_model(loaded_model)
-            st.success(
-                f"Modelo cargado: {info['backend']} · {info['task']} · {info['source']}"
+            st.markdown(f"**{artifact.display_name}**")
+            st.caption(
+                f"Archivo: {artifact.filename} · {artifact.size_bytes:,} bytes · "
+                f"SHA-256 esperado: {artifact.sha256}"
             )
-            st.write(f"Clases verificadas: {info['classes']}.")
-            if info["fallback"]:
-                st.warning(info["fallback"])
-            fingerprint_path = Path(info["path"]) if info["path"] else selected_path
+            if info:
+                st.success(f"Cargado y validado · {info.get('backend', 'PyTorch')} · {info.get('task', 'segment')}")
+                st.write(f"Clases: {info.get('classes', 'sin datos')} · Dispositivo: {info.get('device', 'no expuesto')}")
+                st.write(f"Entrada: {info.get('input_size', 'no expuesta')} · Consultas: {info.get('num_queries', 'no expuestas')}")
+                st.caption(f"Huella del checkpoint cargado: `{info.get('artifact_sha256', artifact.sha256)}`")
+                if info.get("last_inference"):
+                    st.write(f"Última inferencia completada: {info['last_inference']}")
+                else:
+                    st.caption("El modelo está cargado; aún no hay una inferencia completada en esta sesión.")
+            elif model_kind == "rfdetr" and live_state is not None:
+                error = str(getattr(live_state, "last_error", ""))
+                if error and not getattr(live_state, "model_loading", False):
+                    st.error(f"No se pudo cargar/inferir este modelo: {error}")
+                else:
+                    st.info("Pendiente en esta sesión; se descargará, verificará y cargará al usar este modo.")
+            else:
+                st.info("Pendiente en esta sesión; se descargará, verificará y cargará al usar este modo.")
+            if model_kind == "mask2former":
+                error = str(st.session_state.get("wssv_mask2former_error", ""))
+                if error:
+                    st.error(f"Falló la carga o inferencia de Mask2Former: {error}")
+            elif live_state is not None:
+                error = str(getattr(live_state, "last_error", ""))
+                if error and info:
+                    st.error(f"Falló una inferencia de RF-DETR: {error}")
+                snapshot = live_state.snapshot()
+                if info and snapshot.get("processed_frames", 0):
+                    st.write(f"Fotogramas inferidos en esta sesión: {snapshot['processed_frames']:,}")
+                if model_kind == "rfdetr":
+                    configured_tracker = getattr(live_state, "_cedia_tracker", None)
+                    active_tracker = (
+                        type(configured_tracker).__name__
+                        if configured_tracker is not None
+                        else "se inicializa al iniciar la detección"
+                    )
+                    st.caption(
+                        f"Tracker de cámara: BoT-SORT · `{LIVE_TRACKER_CONFIG.relative_to(APP_DIR)}` · "
+                        f"instancia en esta sesión: {active_tracker}. "
+                        "Video cargado: ByteTrack. Clase final por mayoría de cada ID "
+                        f"(mínimo {LIVE_TRACK_MIN_OBSERVATIONS} observaciones)."
+                    )
 
-        if st.button("Calcular huella SHA-256 del modelo", key="model_fingerprint_check"):
-            st.code(model_artifact_fingerprint(fingerprint_path), language=None)
 
-
-def reset_trackers(model: YOLO) -> None:
+def reset_trackers(model: Any) -> None:
     """Evita que IDs de un análisis anterior pasen al siguiente video."""
     adapter_reset = getattr(model, "reset_tracker", None)
     if callable(adapter_reset):
@@ -1522,7 +1614,7 @@ class LiveSessionState:
     last_error: str = ""
     inference_retry_at: float = 0.0
     model_loading: bool = False
-    inference_model: YOLO | None = None
+    inference_model: Any | None = None
     inference_model_names: dict[int, str] = field(default_factory=lambda: DEFAULT_MODEL_NAMES.copy())
     completed_samples: list[dict[str, Any]] = field(default_factory=list)
     pending_sample: dict[str, Any] | None = None
@@ -3115,7 +3207,7 @@ def show_summary(
 
 
 def process_image(
-    model: YOLO, image_bytes: bytes, confidence: float, image_size: int, mask_opacity: float
+    model: Any, image_bytes: bytes, confidence: float, mask_opacity: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int], dict[str, Any] | None]:
     """Segmenta una fotografía sin seguimiento: una inferencia y un conteo directo."""
     image_array = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -3123,7 +3215,7 @@ def process_image(
     if image is None:
         raise ValueError("No fue posible leer la imagen. Usa PNG, JPG, JPEG o TIFF.")
 
-    result = model.predict(image, conf=confidence, imgsz=image_size, verbose=False)[0]
+    result = model.predict(image, conf=confidence)[0]
     model_names = get_model_names(model)
     healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
     sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
@@ -3132,10 +3224,9 @@ def process_image(
 
 
 def process_video(
-    model: YOLO,
+    model: Any,
     uploaded_video: Any,
     confidence: float,
-    image_size: int,
     mask_opacity: float,
     frame_stride: int,
     show_masks: bool,
@@ -3174,8 +3265,8 @@ def process_video(
         if width <= 0 or height <= 0:
             raise ValueError("El video no tiene dimensiones válidas.")
 
-        # Solo se usa OpenCV para conocer las propiedades del video; YOLO recibe
-        # el archivo completo en una única llamada, no un fotograma por llamada.
+        # OpenCV lee propiedades y fotogramas; el adaptador de segmentación
+        # procesa los fotogramas muestreados y mantiene sus IDs entre cuadros.
         capture.release()
         capture = None
 
@@ -3207,12 +3298,9 @@ def process_video(
             source=str(source_path),
             stream=True,
             persist=True,
-            tracker="bytetrack.yaml",
             conf=confidence,
-            imgsz=image_size,
-            retina_masks=True,
             vid_stride=frame_stride,
-            verbose=False,
+            tracker="bytetrack.yaml",
         )
         for result in results:
             if video_calibration is None:
@@ -3249,7 +3337,7 @@ def process_video(
             status_text.caption(f"Procesando fotograma {source_frame:,} de {frame_count:,}…")
 
             # Se muestra el video durante el análisis, pero se limita a cuatro
-            # actualizaciones por segundo para no ralentizar YOLO.
+            # actualizaciones por segundo para no ralentizar la inferencia.
             now = time.monotonic()
             if preview_placeholder is not None and (
                 processed_frames == 1 or now - last_preview_update >= 0.25
@@ -3309,14 +3397,13 @@ def process_video(
 
 
 def render_photo_mode(
-    model: YOLO | None,
+    model: Any | None,
     confidence: float,
-    image_size: int,
     mask_opacity: float,
     low_limit: float,
     medium_limit: float,
     high_limit: float,
-    model_loader: Callable[[], YOLO] | None = None,
+    model_loader: Callable[[], Any] | None = None,
 ) -> None:
     """Renderiza el flujo rápido de una sola fotografía."""
     st.markdown(
@@ -3384,11 +3471,20 @@ def render_photo_mode(
                         raise RuntimeError("El modelo de inferencia aún no está disponible.")
                     analysis_model = model_loader()
                 original_image, healthy_masks, sick_masks, counts, measurements = process_image(
-                    analysis_model, image_bytes, confidence, image_size, mask_opacity
+                    analysis_model, image_bytes, confidence, mask_opacity
                 )
             except Exception as error:
+                st.session_state["wssv_mask2former_error"] = f"{type(error).__name__}: {error}"
                 st.exception(error)
                 return
+        record_mask2former_inference(
+            "Foto",
+            {
+                "sana": counts["sana"],
+                "enferma": counts["enferma"],
+                "total": counts["total"],
+            },
+        )
         st.session_state["photo_analysis"] = {
             "image_id": image_id,
             "render_version": PHOTO_RENDER_VERSION,
@@ -3806,10 +3902,10 @@ def render_live_sample_results(
 
 
 def render_live_camera(
-    model: YOLO | None,
+    model: Any | None,
     confidence: float,
     mask_opacity: float,
-    model_loader: Callable[[], YOLO] | None = None,
+    model_loader: Callable[[], Any] | None = None,
 ) -> None:
     """Mantiene la cámara activa y ejecuta el tracker solo cuando el usuario lo inicia."""
     if not WEBRTC_AVAILABLE:
@@ -3833,6 +3929,7 @@ def render_live_camera(
             state.inference_model = model
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
             state.model_runtime_info = describe_loaded_model(model)
+            state.model_runtime_info["artifact_sha256"] = MODEL_ARTIFACTS["rfdetr"].sha256
         elif state.inference_model is not None and not str(
             getattr(state.inference_model, "_cell_health_model_source", "")
         ).startswith("RF-DETR-Seg 2XL"):
@@ -3955,13 +4052,18 @@ def render_live_camera(
 
         state.reset_metrics()
         state.measurement_track_ids = set()
-        if hasattr(state, "_cedia_tracker"):
-            delattr(state, "_cedia_tracker")
         st.session_state.pop("live_pending_sample", None)
         with state.lock:
             active_model = state.inference_model
-        if active_model is not None:
-            with LIVE_INFERENCE_LOCK:
+        with LIVE_INFERENCE_LOCK:
+            for attribute in (
+                "_cedia_tracker",
+                "_cedia_tracker_args",
+                "_cedia_tracker_config",
+            ):
+                if hasattr(state, attribute):
+                    delattr(state, attribute)
+            if active_model is not None:
                 reset_trackers(active_model)
         if lot_name:
             remember_pool(lot_name)
@@ -3973,7 +4075,7 @@ def render_live_camera(
         state.set_detection_active(True)
 
     def ensure_live_model() -> None:
-        """Prepara YOLO en segundo plano sin detener el flujo de la cámara."""
+        """Prepara RF-DETR en segundo plano sin detener el flujo de la cámara."""
         if model_loader is None:
             return
         with state.lock:
@@ -3987,6 +4089,7 @@ def render_live_camera(
                 loaded_names = get_model_names(loaded_model)
                 validate_cell_model_contract(loaded_model.task, loaded_names)
                 runtime_info = describe_loaded_model(loaded_model)
+                runtime_info["artifact_sha256"] = MODEL_ARTIFACTS["rfdetr"].sha256
                 with state.lock:
                     state.inference_model = loaded_model
                     state.inference_model_names = loaded_names
@@ -4003,23 +4106,28 @@ def render_live_camera(
         Thread(target=load_in_background, daemon=True).start()
 
     def run_live_inference(image: np.ndarray, generation: int) -> None:
-        """Ejecuta YOLO fuera del callback para no congelar el video al comenzar."""
+        """Ejecuta RF-DETR fuera del callback para no congelar el video al comenzar."""
         try:
             with state.lock:
+                if generation != state.inference_generation or not state.detection_active:
+                    return
                 active_model = state.inference_model
                 model_names = dict(state.inference_model_names)
             if active_model is None:
                 raise RuntimeError("El modelo aún no está listo; vuelve a iniciar la detección.")
             with LIVE_INFERENCE_LOCK:
+                # Un hilo antiguo puede quedar esperando el bloqueo mientras la
+                # persona detiene y vuelve a iniciar la muestra. No debe tocar
+                # el tracker nuevo ni transferir IDs de la captura anterior.
+                with state.lock:
+                    if generation != state.inference_generation or not state.detection_active:
+                        return
                 results = active_model.track(
                     source=image,
                     conf=confidence,
-                    imgsz=resolution["inference_size"],
-                    retina_masks=True,
                     persist=True,
-                    tracker=str(LIVE_TRACKER_CONFIG),
                     tracker_state=state,
-                    verbose=False,
+                    tracker=LIVE_TRACKER_CONFIG,
                 )
             if not results:
                 empty_mask = np.zeros_like(image)
@@ -4039,7 +4147,7 @@ def render_live_camera(
             healthy_masks = mask_frame(result, image.shape, model_names, {"sana"})
             sick_masks = mask_frame(result, image.shape, model_names, {"enferma"})
             with state.lock:
-                # Si el usuario detuvo o reinició la muestra mientras YOLO
+                # Si el usuario detuvo o reinició la muestra mientras RF-DETR
                 # trabajaba, el resultado viejo no debe contaminar la siguiente.
                 if state.inference_generation != generation or not state.detection_active:
                     return
@@ -4103,7 +4211,7 @@ def render_live_camera(
             if not detection_active:
                 return make_output_frame(image)
 
-            # La captura se contabiliza antes de esperar a OpenVINO. Así,
+            # La captura se contabiliza antes de esperar a RF-DETR. Así,
             # detener la sesión siempre deja una muestra guardable, incluso
             # si una inferencia puntual tarda o devuelve cero detecciones.
             with state.lock:
@@ -4122,7 +4230,7 @@ def render_live_camera(
                 and time.monotonic() >= inference_retry_at
             ):
                 # Solo se agenda un fotograma a la vez. El callback sigue
-                # entregando video mientras OpenVINO termina el fotograma.
+                # entregando video mientras RF-DETR termina el fotograma.
                 with state.lock:
                     if (
                         state.detection_active
@@ -4206,7 +4314,7 @@ def render_live_camera(
                     "audio": False,
                 },
                 "video_frame_callback": process_live_frame,
-                # El callback solo entrega el último cuadro y agenda YOLO en
+                # El callback solo entrega el último cuadro y agenda RF-DETR en
                 # otro hilo. La cola de un elemento evita que la inferencia
                 # lenta acumule retraso y memoria mientras la cámara continúa.
                 "async_processing": True,
@@ -5689,13 +5797,16 @@ def main() -> None:
 
     # Parámetros internos: se ocultan para mantener la interfaz enfocada en el análisis.
     confidence = 0.35
-    image_size = PHOTO_IMAGE_SIZE
     mask_opacity = 0.50
     low_limit, medium_limit, high_limit = 10.0, 30.0, 60.0
 
     def get_app_model() -> Any:
         """Photo and uploaded-video modes use the v6 Mask2Former winner."""
-        return get_wssv_v6_model("mask2former")
+        model = get_wssv_v6_model("mask2former")
+        runtime_info = describe_loaded_model(model)
+        runtime_info["artifact_sha256"] = MODEL_ARTIFACTS["mask2former"].sha256
+        st.session_state["wssv_mask2former_runtime"] = runtime_info
+        return model
 
     def get_live_app_model() -> Any:
         """Live camera mode uses the v6 RF-DETR-Seg 2XL winner."""
@@ -5721,23 +5832,21 @@ def main() -> None:
         if not st.button("Analizar y reproducir detección", type="primary", use_container_width=True):
             return
 
-        model = get_app_model()
-
-        st.subheader("Detección en curso")
-        st.caption(
-            "El video original se muestra con las máscaras superpuestas mientras se analiza."
-            if show_video_masks
-            else "El video original se muestra mientras se analiza y se realiza el conteo."
-        )
-        preview_placeholder = st.empty()
-        progress_bar = st.progress(0.0)
-        status_text = st.empty()
         try:
+            model = get_app_model()
+            st.subheader("Detección en curso")
+            st.caption(
+                "El video original se muestra con las máscaras superpuestas mientras se analiza."
+                if show_video_masks
+                else "El video original se muestra mientras se analiza y se realiza el conteo."
+            )
+            preview_placeholder = st.empty()
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
             video_masks, counts, tracked_detections, video_measurements = process_video(
                 model,
                 uploaded_video,
                 confidence,
-                VIDEO_IMAGE_SIZE,
                 mask_opacity,
                 VIDEO_INFERENCE_STRIDE,
                 show_video_masks,
@@ -5746,11 +5855,16 @@ def main() -> None:
                 preview_placeholder,
             )
         except Exception as error:
-            progress_bar.empty()
-            status_text.empty()
+            st.session_state["wssv_mask2former_error"] = f"{type(error).__name__}: {error}"
+            if "progress_bar" in locals():
+                progress_bar.empty()
+            if "status_text" in locals():
+                status_text.empty()
             gc.collect()
             st.exception(error)
             return
+
+        record_mask2former_inference("Video", counts)
 
         # Al terminar se retira la previsualización temporal: queda un solo video final.
         preview_placeholder.empty()
@@ -5811,7 +5925,6 @@ def main() -> None:
             render_photo_mode(
                 None,
                 confidence,
-                image_size,
                 mask_opacity,
                 low_limit,
                 medium_limit,
@@ -5821,7 +5934,7 @@ def main() -> None:
         with video_tab:
             live_camera_tab, uploaded_video_tab = st.tabs(["Cámara en vivo", "Subir video"])
             with live_camera_tab:
-                # La carga/compilación de OpenVINO se inicia en segundo plano después
+                # La carga del checkpoint RF-DETR se inicia en segundo plano después
                 # de pulsar «Iniciar detección». La vista WebRTC debe seguir dibujándose
                 # para que capture fotogramas desde el primer clic.
                 # Do not reuse a YOLO checkpoint cached by an older app version:
@@ -5839,6 +5952,7 @@ def main() -> None:
                 )
             with uploaded_video_tab:
                 render_uploaded_video_mode()
+        render_wssv_model_diagnostics()
     elif analysis_mode == VACUOLIZATION_LABEL:
         st.info("La sección de vacuolización está preparada para incorporar su modelo.")
     else:

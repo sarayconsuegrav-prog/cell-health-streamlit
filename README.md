@@ -1,16 +1,15 @@
 # Interfaz de segmentación celular con Streamlit
 
-La aplicación analiza **fotos y videos** con el modelo YOLO de segmentación. En las fotos conserva la imagen original y permite mostrar u ocultar las máscaras superpuestas; las células sanas se muestran en verde y las enfermas en rojo. El video exportado conserva el video original y superpone las máscaras, sin cajas ni etiquetas.
+La aplicación segmenta células de **WSSV** con los checkpoints finos de CEDIA v6. Foto y video cargado usan Mask2Former; la cámara en vivo usa RF-DETR-Seg. Ambos modelos producen máscaras de células sanas y enfermas para las métricas y el historial.
 
 ## Análisis de fotos
 
 El modo **Foto** es el predeterminado y hace una sola inferencia, por lo que es mucho más rápido que el video. Acepta PNG, JPG, JPEG y TIFF, muestra las máscaras sobre la fotografía, cuenta las células detectadas, calcula el porcentaje de enfermas y permite descargar la imagen en PNG y un reporte CSV.
 
-El tamaño de inferencia inicial es 1280 px para preservar el detalle de las
-células pequeñas. La metadata del OpenVINO incluido registra una exportación a
-640×640 con entrada dinámica; comprobé que ese artefacto acepta 512×512,
-640×480 y 1280×1280. La metadata de exportación no basta para confirmar el
-tamaño usado durante el entrenamiento.
+Mask2Former procesa las fotos a **1280 × 960** para preservar el detalle de las
+células pequeñas. RF-DETR usa la resolución guardada en su checkpoint. En la
+pestaña de cámara, la resolución elegida controla la captura del navegador y la
+frecuencia de inferencia; no cambia la resolución interna entrenada del modelo.
 
 ## Análisis de videos
 
@@ -86,77 +85,43 @@ usuario. El secreto nunca debe escribirse en `app.py` ni confirmarse en GitHub.
 Si falta alguna configuración, el botón seguirá visible y mostrará el dato que
 falta sin indicar que el lote fue enviado.
 
-## Modelo
+## Modelo activo
 
-El artefacto incluido en `models/best_openvino_model/` es un modelo YOLO11m de
-segmentación, exportado el 20 de septiembre de 2026. Su metadata declara que
-fue entrenado con `data_wssv_seg_optimized_md5.yaml` y estas clases:
-
-- `0`: `celula_enferma`
-- `1`: `celula_sana`
-
-Por defecto, foto, video y cámara en vivo usan el artefacto OpenVINO incluido
-en el repositorio. El análisis de foto usa `predict`; los dos modos de video
-usan ese mismo artefacto con seguimiento `track`. La expansión **Verificación
-del modelo** muestra el backend, el archivo realmente cargado y las clases
-validadas antes de inferir.
-
-### Backend OpenVINO para CPU
-
-La selección del modelo respeta este orden: `CELL_OPENVINO_MODEL_DIR`, después
-`CELL_OPENVINO_MODEL_URL`, y finalmente la copia incluida en el repositorio.
-La URL debe ser un ZIP con los archivos `.xml`, `.bin` y `metadata.yaml`.
-Cada URL tiene su propio caché, por lo que cambiarla no reutiliza una descarga
-anterior. Estas variables se pueden establecer en el entorno o en **Secrets**
-de Streamlit Cloud. Para una prueba local:
-
-```bash
-export CELL_MODEL_BACKEND=openvino
-export CELL_OPENVINO_MODEL_DIR="/ruta/a/best_openvino_model"
-streamlit run app.py
-```
-
-Si no hay ningún artefacto OpenVINO disponible, la app descarga el checkpoint
-PyTorch indicado por `CELL_MODEL_URL` (por defecto, la release pública
-`v1.0.0`) y trata de convertirlo. El respaldo PyTorch se conserva para
-disponibilidad, pero la aplicación lo identifica y advierte que no se ha
-verificado que sus pesos coincidan con el modelo OpenVINO empaquetado; no deben
-considerarse intercambiables sin validación.
-
-Antes de inferir, cada artefacto debe declarar la tarea `segment` y exactamente
-una clase sana y una enferma en los IDs 0 y 1. Si no cumple este contrato, la
-app lo rechaza en vez de producir silenciosamente conteos de clases dudosos.
-El caché de sesión detecta también cambios en los archivos aunque conserven la
-misma ruta. Para forzar PyTorch directamente, usa `CELL_MODEL_BACKEND=pt`.
-
-Si se reemplaza el modelo local, conserva este nombre y ubicación:
-
-```bash
-mkdir -p models
-cp "/ruta/al/nuevo/modelo.pt" models/best.pt
-```
-
-## Modelos de WSSV v6 en la aplicación
-
-La aplicación selecciona los dos checkpoints finos de CEDIA WSSV v6 según el
-tipo de entrada:
+Las rutas activas de **Mancha blanca (WSSV)** usan estos checkpoints exactos:
 
 - **Foto y video cargado:** Mask2Former Swin-S, checkpoint de mejor época de
-  validación (`mejor.pth`, 275,785,875 bytes en CEDIA).
+  validación (`mask2former-mejor.pth`).
 - **Cámara en vivo:** RF-DETR-Seg 2XL, checkpoint de mejor mAP total de
-  validación (`checkpoint_best_total.pth`, 160,963,881 bytes en CEDIA).
+  validación (`rfdetr-checkpoint-best-total.pth`).
 
-Los artefactos grandes se descargan desde la release `wssv-v6-models` de GitHub
-la primera vez que se abre cada modo y quedan en caché temporal. No se guardan
-los pesos dentro del repositorio. Los dos modelos devuelven máscaras en la
-resolución original de cada fotograma. Para el conteo de video, la app asocia
-detecciones entre fotogramas mediante IoU de cajas; se reinicia el seguimiento
-al comenzar cada video o muestra en vivo.
+Los pesos se descargan desde la release `wssv-v6-models`, se verifican contra su
+tamaño y SHA-256 publicados y se almacenan en caché en el servidor. La descarga
+se instala de forma atómica para evitar que una sesión lea un archivo parcial.
+Mask2Former selecciona como máximo una clase por consulta; una misma máscara no
+puede sumarse a la vez como sana y enferma. En cámara, el tracker asocia cajas
+entre fotogramas aunque la clase fluctúe; el conteo final usa el voto
+mayoritario de cada seguimiento, con un mínimo de dos observaciones. La cámara
+usa ahora el BoT-SORT configurado en `trackers/live_botsort.yaml`, incluida la
+compensación de movimiento de cámara; el video cargado usa ByteTrack de
+Ultralytics. Ambos devuelven IDs que el adaptador vuelve a asociar con las
+máscaras originales. Las detecciones de baja confianza solo se conservan si el
+tracker las vincula a una identidad existente; las detecciones de alta
+confianza siguen visibles aunque el tracker aún no les asigne ID.
 
-El entorno fija `torch`, `torchvision`, `rfdetr` y `transformers` a las versiones
-usadas por CEDIA. La inferencia ocurre en CPU en Streamlit Cloud salvo que el
-entorno provea CUDA. Los tiempos GPU del informe de CEDIA no representan el
-rendimiento en esta app.
+La expansión **Verificación del modelo** muestra la huella del código, las
+versiones instaladas, la ruta activa para cada modo y el archivo y SHA-256
+esperados. Al cargar un modelo también muestra las clases, el dispositivo, la
+resolución y el número de consultas de esa sesión. `CELL_MODEL_URL`,
+`CELL_MODEL_BACKEND` y las variables OpenVINO pertenecen al cargador YOLO
+heredado y **no cambian** las rutas actuales de WSSV.
+
+### Compatibilidad heredada con YOLO/OpenVINO
+
+El repositorio conserva el cargador anterior de YOLO11m/OpenVINO y las
+variables `CELL_MODEL_BACKEND`, `CELL_OPENVINO_MODEL_DIR`,
+`CELL_OPENVINO_MODEL_URL` y `CELL_MODEL_URL` para compatibilidad con artefactos
+antiguos. La interfaz actual de WSSV v6 no llama ese cargador. Esos Secrets no
+seleccionan el modelo activo de foto, video ni cámara.
 
 ## Instalación y ejecución
 
