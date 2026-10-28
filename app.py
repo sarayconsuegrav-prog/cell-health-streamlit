@@ -5806,11 +5806,6 @@ def main() -> None:
             )
 
     if analysis_mode == WHITE_SPOT_LABEL:
-        st.caption(
-            "Modelos WSSV v6 seleccionados: Mask2Former para fotos y videos cargados; "
-            "RF-DETR-Seg 2XL para cámara en vivo. Cada modelo se descarga y carga "
-            "solo cuando se abre su modo."
-        )
         photo_tab, video_tab = st.tabs(["Foto", "Video"])
         with photo_tab:
             render_photo_mode(
