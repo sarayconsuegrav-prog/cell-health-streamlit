@@ -10,6 +10,14 @@ ultralytics==8.4.158
 lap==0.5.13
 openvino==2026.4.0
 
+# Fine-tuned CEDIA WSSV v6 models: RF-DETR-Seg 2XL (live camera) and
+# Mask2Former Swin-S (photos and uploaded videos). Match the training stack so
+# the Mask2Former state_dict and RF-DETR checkpoint load without conversion.
+torch==2.10.0
+torchvision==0.25.0
+rfdetr==1.11.2
+transformers==5.19.0
+
 # Use the headless OpenCV wheel (the app does not call GUI APIs) and avoid
 # silently moving to OpenCV 5 or NumPy 3 in the live application.
 opencv-python-headless>=4.10,<5

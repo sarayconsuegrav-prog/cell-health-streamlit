@@ -89,6 +89,17 @@ OPENVINO_MODEL_DIR = APP_DIR / "models" / "best_openvino_model"
 OPENVINO_MODEL_URL = runtime_setting("CELL_OPENVINO_MODEL_URL")
 CACHED_MODEL = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "best.pt"
 CACHED_OPENVINO_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "openvino"
+CEDIa_MODEL_ROOT = Path(tempfile.gettempdir()) / "cell-health-streamlit" / "wssv-v6"
+MASK2FORMER_MODEL_URL = (
+    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/"
+    "wssv-v6-models/mask2former-mejor.pth"
+)
+RFDETR_MODEL_URL = (
+    "https://github.com/sarayconsuegrav-prog/cell-health-streamlit/releases/download/"
+    "wssv-v6-models/rfdetr-checkpoint-best-total.pth"
+)
+_WSSV_V6_MODELS: dict[str, Any] = {}
+_WSSV_V6_MODEL_LOCK = Lock()
 MODEL_RESOLUTION_NOTICES: list[str] = []
 PHOTO_RENDER_VERSION = "measurement-diameter-perimeter-class-masks-v11"
 # La foto de referencia tiene una barra de escala negra cuyo rótulo indica 50 µm.
@@ -828,6 +839,45 @@ def model_artifact_fingerprint(model_path: Path) -> str:
     return _cached_model_fingerprint(tuple(signature))
 
 
+def download_cedia_checkpoint(filename: str, url: str) -> Path:
+    """Download and cache a large, versioned model artifact from the v6 release."""
+    target = CEDIa_MODEL_ROOT / filename
+    if target.is_file() and target.stat().st_size > 1_000_000:
+        return target
+    CEDIa_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".download")
+    try:
+        with urllib.request.urlopen(url, timeout=600) as source, temporary.open("wb") as output:
+            shutil.copyfileobj(source, output)
+        if temporary.stat().st_size < 1_000_000:
+            raise ValueError("El artefacto descargado está incompleto.")
+        os.replace(temporary, target)
+        return target
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def get_wssv_v6_model(model_kind: str) -> Any:
+    """Load each large v6 model once per app process, including background threads."""
+    if model_kind == "mask2former":
+        url, filename = MASK2FORMER_MODEL_URL, "mask2former-mejor.pth"
+    elif model_kind == "rfdetr":
+        url, filename = RFDETR_MODEL_URL, "rfdetr-checkpoint-best-total.pth"
+    else:
+        raise ValueError(f"Modelo WSSV v6 desconocido: {model_kind}")
+    with _WSSV_V6_MODEL_LOCK:
+        model = _WSSV_V6_MODELS.get(model_kind)
+        if model is None:
+            checkpoint = download_cedia_checkpoint(filename, url)
+            from model_adapters import Mask2FormerAdapter, RFDETRSegAdapter
+
+            model_class = Mask2FormerAdapter if model_kind == "mask2former" else RFDETRSegAdapter
+            model = model_class(checkpoint)
+            _WSSV_V6_MODELS[model_kind] = model
+    return model
+
+
 def load_model(model_path: str | Path) -> YOLO:
     """Carga y valida que el artefacto sea el segmentador celular esperado."""
     path = Path(model_path)
@@ -1029,6 +1079,10 @@ def render_model_diagnostics(selected_path: Path) -> None:
 
 def reset_trackers(model: YOLO) -> None:
     """Evita que IDs de un análisis anterior pasen al siguiente video."""
+    adapter_reset = getattr(model, "reset_tracker", None)
+    if callable(adapter_reset):
+        adapter_reset()
+        return
     predictor = getattr(model, "predictor", None)
     for tracker in getattr(predictor, "trackers", []) or []:
         if hasattr(tracker, "reset"):
@@ -3779,6 +3833,13 @@ def render_live_camera(
             state.inference_model = model
             state.inference_model_names = model_names or DEFAULT_MODEL_NAMES.copy()
             state.model_runtime_info = describe_loaded_model(model)
+        elif state.inference_model is not None and not str(
+            getattr(state.inference_model, "_cell_health_model_source", "")
+        ).startswith("RF-DETR-Seg 2XL"):
+            # Discard a YOLO model left in a live session by a previous app build.
+            state.inference_model = None
+            state.inference_model_names = DEFAULT_MODEL_NAMES.copy()
+            state.model_runtime_info = {}
     if "live_camera_playing" not in st.session_state:
         st.session_state["live_camera_playing"] = False
     if "live_camera_requested" not in st.session_state:
@@ -3894,6 +3955,8 @@ def render_live_camera(
 
         state.reset_metrics()
         state.measurement_track_ids = set()
+        if hasattr(state, "_cedia_tracker"):
+            delattr(state, "_cedia_tracker")
         st.session_state.pop("live_pending_sample", None)
         with state.lock:
             active_model = state.inference_model
@@ -3955,6 +4018,7 @@ def render_live_camera(
                     retina_masks=True,
                     persist=True,
                     tracker=str(LIVE_TRACKER_CONFIG),
+                    tracker_state=state,
                     verbose=False,
                 )
             if not results:
@@ -5629,72 +5693,13 @@ def main() -> None:
     mask_opacity = 0.50
     low_limit, medium_limit, high_limit = 10.0, 30.0, 60.0
 
-    model_path: Path | None = None
-    if analysis_mode == WHITE_SPOT_LABEL:
-        if MODEL_BACKEND not in {"openvino", "ov", "pt"}:
-            st.error(
-                f"CELL_MODEL_BACKEND='{MODEL_BACKEND}' no es válido. Usa `openvino` o `pt`."
-            )
-            st.stop()
-        model_path = default_model_path()
-        if model_path is None and MODEL_BACKEND in {"openvino", "ov"}:
-            model_path = default_pt_model_path()
-        if model_path is None or not (
-            model_path.is_file() or is_openvino_model_dir(model_path)
-        ):
-            if MODEL_BACKEND in {"openvino", "ov"}:
-                st.error(
-                    "Se seleccionó OpenVINO, pero no se encontró el modelo convertido. "
-                    "Configura `CELL_OPENVINO_MODEL_DIR` o `CELL_OPENVINO_MODEL_URL`."
-                )
-            else:
-                st.error("No se encontró el archivo del modelo `best.pt`.")
-            st.stop()
+    def get_app_model() -> Any:
+        """Photo and uploaded-video modes use the v6 Mask2Former winner."""
+        return get_wssv_v6_model("mask2former")
 
-    def get_app_model() -> YOLO:
-        """Carga el modelo solo cuando el modo elegido realmente lo necesita."""
-        nonlocal model_path
-        if model_path is None:
-            raise RuntimeError("No se resolvió el artefacto del modelo de segmentación.")
-        try:
-            loaded_model = get_session_model(model_path)
-        except Exception as error:
-            if MODEL_BACKEND in {"openvino", "ov"} and model_path.is_dir():
-                st.session_state["openvino_fallback_for"] = (
-                    f"{model_path}:{model_path_signature(model_path)}"
-                )
-                fallback_path = default_pt_model_path()
-                try:
-                    loaded_model = get_session_model(fallback_path)
-                    fallback_message = (
-                        "OpenVINO no pudo cargarse. Se usa PyTorch desde "
-                        f"`{fallback_path.name}`; no está verificado que sus pesos "
-                        "coincidan con el modelo OpenVINO empaquetado. "
-                        f"Detalle de OpenVINO: {type(error).__name__}: {error}"
-                    )
-                    loaded_model._cell_health_fallback_message = fallback_message
-                    st.warning(fallback_message)
-                    model_path = fallback_path
-                except Exception as fallback_error:
-                    st.error(
-                        "No fue posible cargar el modelo OpenVINO ni el respaldo `.pt`: "
-                        f"{fallback_error}"
-                    )
-                    st.stop()
-            else:
-                st.error(f"No fue posible cargar el modelo: {error}")
-                st.stop()
-
-        if loaded_model.task != "segment":
-            st.error(
-                f"El modelo cargado es de tipo `{loaded_model.task}`. "
-                "Esta aplicación requiere un modelo de segmentación."
-            )
-            st.stop()
-        return loaded_model
-
-    if analysis_mode == WHITE_SPOT_LABEL and model_path is not None:
-        render_model_diagnostics(model_path)
+    def get_live_app_model() -> Any:
+        """Live camera mode uses the v6 RF-DETR-Seg 2XL winner."""
+        return get_wssv_v6_model("rfdetr")
 
     def render_uploaded_video_mode() -> None:
         """Renderiza el análisis de un archivo de video dentro de su pestaña."""
@@ -5801,6 +5806,11 @@ def main() -> None:
             )
 
     if analysis_mode == WHITE_SPOT_LABEL:
+        st.caption(
+            "Modelos WSSV v6 seleccionados: Mask2Former para fotos y videos cargados; "
+            "RF-DETR-Seg 2XL para cámara en vivo. Cada modelo se descarga y carga "
+            "solo cuando se abre su modo."
+        )
         photo_tab, video_tab = st.tabs(["Foto", "Video"])
         with photo_tab:
             render_photo_mode(
@@ -5819,10 +5829,12 @@ def main() -> None:
                 # La carga/compilación de OpenVINO se inicia en segundo plano después
                 # de pulsar «Iniciar detección». La vista WebRTC debe seguir dibujándose
                 # para que capture fotogramas desde el primer clic.
-                model = st.session_state.get("cell_model")
+                # Do not reuse a YOLO checkpoint cached by an older app version:
+                # this camera route is specifically RF-DETR-Seg 2XL from WSSV v6.
+                model = None
 
-                def load_live_model_for_session() -> YOLO:
-                    return load_live_model(model_path)
+                def load_live_model_for_session() -> Any:
+                    return get_live_app_model()
 
                 render_live_camera(
                     model,

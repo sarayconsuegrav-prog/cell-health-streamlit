@@ -136,6 +136,28 @@ mkdir -p models
 cp "/ruta/al/nuevo/modelo.pt" models/best.pt
 ```
 
+## Modelos de WSSV v6 en la aplicación
+
+La aplicación selecciona los dos checkpoints finos de CEDIA WSSV v6 según el
+tipo de entrada:
+
+- **Foto y video cargado:** Mask2Former Swin-S, checkpoint de mejor época de
+  validación (`mejor.pth`, 275,785,875 bytes en CEDIA).
+- **Cámara en vivo:** RF-DETR-Seg 2XL, checkpoint de mejor mAP total de
+  validación (`checkpoint_best_total.pth`, 160,963,881 bytes en CEDIA).
+
+Los artefactos grandes se descargan desde la release `wssv-v6-models` de GitHub
+la primera vez que se abre cada modo y quedan en caché temporal. No se guardan
+los pesos dentro del repositorio. Los dos modelos devuelven máscaras en la
+resolución original de cada fotograma. Para el conteo de video, la app asocia
+detecciones entre fotogramas mediante IoU de cajas; se reinicia el seguimiento
+al comenzar cada video o muestra en vivo.
+
+El entorno fija `torch`, `torchvision`, `rfdetr` y `transformers` a las versiones
+usadas por CEDIA. La inferencia ocurre en CPU en Streamlit Cloud salvo que el
+entorno provea CUDA. Los tiempos GPU del informe de CEDIA no representan el
+rendimiento en esta app.
+
 ## Instalación y ejecución
 
 La versión publicada usa Python 3.14. `requirements.txt` fija las versiones
