@@ -855,19 +855,18 @@ def measure_cells_from_scale_bar(
     return summarize_measurement_samples(samples, calibration_from_image(image))
 
 
+GRADE_LIMITS = (10.0, 30.0, 50.0, 80.0)
+GRADE_DESCRIPTIONS = ("Cero", "Muy leve", "Leve", "Moderada", "Severa")
+
+
 def grade_from_percentage(
-    affected_percentage: float, low_limit: float, medium_limit: float, high_limit: float
+    affected_percentage: float, limits: tuple[float, float, float, float] = GRADE_LIMITS
 ) -> tuple[str, str]:
-    """Escala provisional configurable hasta contar con la rúbrica validada."""
-    if affected_percentage <= 0:
-        return "Grado 0", "Sin afectación"
-    if affected_percentage <= low_limit:
-        return "Grado 1", "Afectación baja"
-    if affected_percentage <= medium_limit:
-        return "Grado 2", "Afectación moderada"
-    if affected_percentage <= high_limit:
-        return "Grado 3", "Afectación alta"
-    return "Grado 4", "Afectación muy alta"
+    """Asigna G0 a G4 según el porcentaje de células enfermas (0–10, 10–30, 30–50, 50–80, 80–100)."""
+    for grade, limit in enumerate(limits):
+        if affected_percentage <= limit:
+            return f"Grado {grade}", GRADE_DESCRIPTIONS[grade]
+    return "Grado 4", GRADE_DESCRIPTIONS[4]
 
 
 def format_class_measurement(measurements: dict[str, Any], category: str) -> str:
@@ -999,14 +998,14 @@ def aggregate_live_sample_metrics(
 
 
 def sample_result_grade(
-    counts: dict[str, int], low_limit: float, medium_limit: float, high_limit: float
+    counts: dict[str, int], limits: tuple[float, float, float, float]
 ) -> tuple[float, str, str]:
     """Obtiene afectación y calificación para una muestra o para el lote."""
     denominator = counts["sana"] + counts["enferma"]
     affected_percentage = counts["enferma"] / denominator * 100 if denominator else 0.0
     if denominator:
         grade, description = grade_from_percentage(
-            affected_percentage, low_limit, medium_limit, high_limit
+            affected_percentage, limits
         )
     else:
         grade, description = "Sin datos", "No se detectaron células clasificadas"
@@ -1016,9 +1015,7 @@ def sample_result_grade(
 def make_live_samples_report_csv(
     lot_name: str,
     samples: list[dict[str, Any]],
-    low_limit: float,
-    medium_limit: float,
-    high_limit: float,
+    limits: tuple[float, float, float, float],
 ) -> bytes:
     """Crea un reporte CSV con las cuatro muestras y el total del lote."""
     output = StringIO()
@@ -1043,7 +1040,7 @@ def make_live_samples_report_csv(
     for sample in samples:
         counts = sample["counts"]
         affected_percentage, grade, description = sample_result_grade(
-            counts, low_limit, medium_limit, high_limit
+            counts, limits
         )
         writer.writerow(
             [
@@ -1061,7 +1058,7 @@ def make_live_samples_report_csv(
 
     aggregate_counts, aggregate_measurements = aggregate_live_sample_metrics(samples)
     aggregate_percentage, aggregate_grade, aggregate_description = sample_result_grade(
-        aggregate_counts, low_limit, medium_limit, high_limit
+        aggregate_counts, limits
     )
     writer.writerow([])
     writer.writerow(["MÉTRICA GENERAL DEL LOTE"])
@@ -1109,9 +1106,7 @@ def live_report_filename(lot_name: str) -> str:
 
 def show_summary(
     counts: dict[str, int],
-    low_limit: float,
-    medium_limit: float,
-    high_limit: float,
+    limits: tuple[float, float, float, float],
     total_label: str,
     sidebar: bool = False,
     measurements: dict[str, Any] | None = None,
@@ -1121,7 +1116,7 @@ def show_summary(
     denominator = counts["sana"] + counts["enferma"]
     affected_percentage = (counts["enferma"] / denominator * 100) if denominator else 0.0
     if denominator:
-        grade, description = grade_from_percentage(affected_percentage, low_limit, medium_limit, high_limit)
+        grade, description = grade_from_percentage(affected_percentage, limits)
         result_note = (
             f"<strong>{escape(description)}.</strong> Se detectaron {counts['enferma']} células enfermas "
             f"de {denominator} células clasificadas."
@@ -1347,9 +1342,7 @@ def render_photo_mode(
     confidence: float,
     image_size: int,
     mask_opacity: float,
-    low_limit: float,
-    medium_limit: float,
-    high_limit: float,
+    limits: tuple[float, float, float, float],
     model_loader: Callable[[], YOLO] | None = None,
 ) -> None:
     """Renderiza el flujo rápido de una sola fotografía."""
@@ -1436,9 +1429,7 @@ def render_photo_mode(
 
     affected_percentage, grade, description = show_summary(
         saved_analysis["counts"],
-        low_limit,
-        medium_limit,
-        high_limit,
+        limits,
         "Total de células detectadas",
         sidebar=True,
         measurements=saved_analysis["measurements"],
@@ -1537,9 +1528,7 @@ def render_live_metrics_panel(
     state: LiveSessionState,
     lot_name: str,
     current_sample_code: str,
-    low_limit: float,
-    medium_limit: float,
-    high_limit: float,
+    limits: tuple[float, float, float, float],
 ) -> None:
     """Muestra las cuatro fichas de camarones y el acumulado del lote."""
 
@@ -1548,13 +1537,11 @@ def render_live_metrics_panel(
         code: str,
         counts: dict[str, int],
         measurements: dict[str, Any] | None,
-        low_limit: float,
-        medium_limit: float,
-        high_limit: float,
+        limits: tuple[float, float, float, float],
         card_class: str = "",
     ) -> str:
         affected_percentage, grade, _ = sample_result_grade(
-            counts, low_limit, medium_limit, high_limit
+            counts, limits
         )
         measurement_text = ""
         if measurements:
@@ -1595,9 +1582,7 @@ def render_live_metrics_panel(
                 current_sample_code or "Código pendiente",
                 counts,
                 snapshot["measurements"],
-                low_limit,
-                medium_limit,
-                high_limit,
+                limits,
                 "live-current-card",
             )
 
@@ -1607,9 +1592,7 @@ def render_live_metrics_panel(
                 sample["code"],
                 sample["counts"],
                 sample.get("measurements"),
-                low_limit,
-                medium_limit,
-                high_limit,
+                limits,
             )
             for sample in completed_samples
         )
@@ -1621,9 +1604,7 @@ def render_live_metrics_panel(
                 "Acumulado",
                 aggregate_counts,
                 aggregate_measurements,
-                low_limit,
-                medium_limit,
-                high_limit,
+                limits,
                 "live-aggregate-card",
             )
 
@@ -1663,9 +1644,7 @@ def render_live_sample_results(
     state: LiveSessionState,
     lot_name: str,
     camera_is_requested: bool,
-    low_limit: float,
-    medium_limit: float,
-    high_limit: float,
+    limits: tuple[float, float, float, float],
 ) -> None:
     """Muestra la tabla final y habilita el reporte al completar cuatro muestras."""
     samples = state.completed_samples_snapshot()
@@ -1675,7 +1654,7 @@ def render_live_sample_results(
     rows: list[dict[str, Any]] = []
     for sample in samples:
         affected_percentage, grade, _ = sample_result_grade(
-            sample["counts"], low_limit, medium_limit, high_limit
+            sample["counts"], limits
         )
         rows.append(
             {
@@ -1694,7 +1673,7 @@ def render_live_sample_results(
 
     aggregate_counts, aggregate_measurements = aggregate_live_sample_metrics(samples)
     aggregate_percentage, aggregate_grade, aggregate_description = sample_result_grade(
-        aggregate_counts, low_limit, medium_limit, high_limit
+        aggregate_counts, limits
     )
     st.markdown(
         f"""
@@ -1734,9 +1713,7 @@ def render_live_sample_results(
         report = make_live_samples_report_csv(
             lot_name or "Lote sin nombre",
             samples,
-            low_limit,
-            medium_limit,
-            high_limit,
+            limits,
         )
         st.download_button(
             "Descargar reporte del lote (4 muestras)",
@@ -2685,7 +2662,7 @@ def main() -> None:
     confidence = 0.35
     image_size = PHOTO_IMAGE_SIZE
     mask_opacity = 0.50
-    low_limit, medium_limit, high_limit = 10.0, 30.0, 60.0
+    limits = GRADE_LIMITS
 
     model_path = default_model_path()
     if model_path is None and MODEL_BACKEND in {"openvino", "ov"}:
@@ -2747,9 +2724,7 @@ def main() -> None:
             confidence,
             image_size,
             mask_opacity,
-            low_limit,
-            medium_limit,
-            high_limit,
+            limits,
             model_loader=get_app_model,
         )
         return
@@ -2816,9 +2791,7 @@ def main() -> None:
     status_text.success("Análisis terminado.")
     affected_percentage, grade, description = show_summary(
         counts,
-        low_limit,
-        medium_limit,
-        high_limit,
+        limits,
         "Total de células únicas",
         sidebar=True,
         measurements=video_measurements,

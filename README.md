@@ -59,7 +59,7 @@ La calificación se calcula usando:
 porcentaje enfermo = células enfermas / (células sanas + células enfermas) × 100
 ```
 
-Una foto con células detectadas y **0% de células enfermas** recibe **Grado 0**. Como aún no se proporcionó una rúbrica, los cortes iniciales para los grados 1 a 3 son 10%, 30% y 60%; un valor superior queda en grado 4. Si no se detectan células, la app muestra “Sin datos” en lugar de asignar una calificación. Reemplaza estos rangos en el código por los criterios científicos o clínicos de tu estudio antes de interpretar el resultado.
+Una foto con células detectadas y **0% de células enfermas** recibe **Grado 0**. Los rangos son: Grado 0 (cero) de 0 a 10 %, Grado 1 (muy leve) de 10 a 30 %, Grado 2 (leve) de 30 a 50 %, Grado 3 (moderada) de 50 a 80 % y Grado 4 (severa) de 80 a 100 %. Los límites están en `GRADE_LIMITS` dentro de `app.py`. Si no se detectan células, la app muestra “Sin datos” en lugar de asignar una calificación.
 
 ## Medición de tamaño celular en fotos
 
